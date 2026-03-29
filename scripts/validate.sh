@@ -191,9 +191,10 @@ run_checks() {
         "sshd -t" \
         ""
 
+    # Debian 12 reports "without-password" (old synonym for "prohibit-password")
     check "PermitRootLogin" \
-        "sshd -T 2>/dev/null | grep -i '^permitrootlogin'" \
-        "prohibit-password"
+        "sshd -T 2>/dev/null | grep -i '^permitrootlogin' | grep -qE 'prohibit-password|without-password' && echo ok" \
+        "ok"
 
     check "PasswordAuthentication" \
         "sshd -T 2>/dev/null | grep -i '^passwordauthentication'" \
@@ -239,12 +240,9 @@ run_checks() {
         "systemctl is-active ${cron_svc}" \
         "active"
 
-    check "rsyslog active" \
-        "systemctl is-active rsyslog" \
-        "active"
-
-    check "systemd-journald active" \
-        "systemctl is-active systemd-journald" \
+    # Accept either rsyslog or journald — Debian 12 uses journald only
+    check "syslog (rsyslog or journald)" \
+        "systemctl is-active rsyslog 2>/dev/null || systemctl is-active systemd-journald" \
         "active"
 }
 
