@@ -44,7 +44,7 @@ check() {
     if [[ ${exit_code} -ne 0 ]]; then
         printf 'FAIL\n'
         (( FAIL_COUNT++ )) || true
-        return 1
+        return 0  # Don't abort — just count the failure
     fi
 
     if [[ -z "${expected}" ]]; then
@@ -105,7 +105,7 @@ run_checks() {
         ""
 
     check "Outbound HTTPS" \
-        "curl -sf -o /dev/null --connect-timeout 10 https://example.com" \
+        "curl -sf -o /dev/null --connect-timeout 10 https://example.com 2>/dev/null || wget -q --spider --timeout=10 https://example.com 2>/dev/null" \
         ""
 
     # ── Package Manager ───────────────────────────────────────────────────────
