@@ -1,0 +1,6 @@
+========================================================================
+                     AUTHORIZED ACCESS ONLY
+
+  This system is for authorized users only. All activity is monitored
+  and logged. Unauthorized access attempts will be reported.
+========================================================================

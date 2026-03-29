@@ -1,0 +1,113 @@
+# =============================================================================
+# Linux Hardener Configuration Template
+# Copy to config/hardener.conf and fill in your values.
+# Lines marked __PLACEHOLDER__ must be replaced before use.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Profile
+# Controls the overall hardening aggressiveness.
+# Options: minimal | standard | aggressive
+# -----------------------------------------------------------------------------
+HARDENING_PROFILE="aggressive"
+
+# -----------------------------------------------------------------------------
+# SSH
+# -----------------------------------------------------------------------------
+SSH_PORT=22
+SSH_PERMIT_ROOT_LOGIN="prohibit-password"
+SSH_PASSWORD_AUTH="no"
+SSH_ALLOW_TCP_FORWARDING="no"
+SSH_ALLOW_AGENT_FORWARDING="no"
+
+# -----------------------------------------------------------------------------
+# Firewall
+# Comma-separated list of allowed TCP/UDP inbound ports.
+# Leave FIREWALL_ALLOWED_UDP_IN empty to block all UDP inbound.
+# -----------------------------------------------------------------------------
+FIREWALL_RESTRICT_OUTPUT="false"
+FIREWALL_ALLOWED_TCP_IN="22"
+FIREWALL_ALLOWED_UDP_IN=""
+
+# -----------------------------------------------------------------------------
+# Filesystem
+# Mount /tmp and /dev/shm with noexec to prevent execution of binaries.
+# -----------------------------------------------------------------------------
+NOEXEC_TMP="true"
+NOEXEC_DEV_SHM="true"
+
+# -----------------------------------------------------------------------------
+# Auth
+# SHELL_TIMEOUT: idle shell timeout in seconds (900 = 15 minutes).
+# LOGIN_BANNER_FILE: path to a custom banner file, or leave empty to use the
+#   built-in banner (config/ssh-banner.txt).
+# -----------------------------------------------------------------------------
+SHELL_TIMEOUT=900
+ENABLE_PASSWORD_POLICY="true"
+ENABLE_LOGIN_BANNER="true"
+LOGIN_BANNER_FILE=""
+
+# -----------------------------------------------------------------------------
+# Services
+# FAIL2BAN_BANTIME: ban duration in seconds.
+# -----------------------------------------------------------------------------
+ENABLE_FAIL2BAN="true"
+FAIL2BAN_MAXRETRY=5
+FAIL2BAN_BANTIME=600
+
+# -----------------------------------------------------------------------------
+# Logging
+# AUDITD_RULES: minimal | full
+# -----------------------------------------------------------------------------
+ENABLE_AUDITD="true"
+AUDITD_RULES="minimal"
+ENABLE_UNATTENDED_UPGRADES="true"
+
+# -----------------------------------------------------------------------------
+# Integrity
+# Installs and initialises AIDE file-integrity monitoring.
+# -----------------------------------------------------------------------------
+ENABLE_AIDE="true"
+
+# -----------------------------------------------------------------------------
+# Sysctl
+# -----------------------------------------------------------------------------
+DISABLE_IPV6="false"
+RESTRICT_DMESG="true"
+RESTRICT_KPTR="true"
+
+# -----------------------------------------------------------------------------
+# Lynis
+# LYNIS_SOURCE: package | git
+# LYNIS_QUICK: skip wait prompts when set to true.
+# -----------------------------------------------------------------------------
+LYNIS_SOURCE="package"
+LYNIS_QUICK="true"
+
+# -----------------------------------------------------------------------------
+# Hetzner Cloud
+# Replace __PLACEHOLDER__ values with your actual credentials.
+# HETZNER_IMAGES: comma-separated list of images to test against.
+# -----------------------------------------------------------------------------
+HETZNER_API_TOKEN="__PLACEHOLDER__"
+HETZNER_SSH_KEY_NAME="__PLACEHOLDER__"
+HETZNER_SSH_KEY_PATH="~/.ssh/id_ed25519"
+HETZNER_SERVER_TYPE="cx22"
+HETZNER_LOCATION="fsn1"
+HETZNER_IMAGES="debian-12,ubuntu-24.04,rocky-9,alma-9"
+
+# -----------------------------------------------------------------------------
+# Orchestration
+# KEEP_ON_FAILURE: keep the server alive after a failed test run for debugging.
+# ENABLE_ITERATION: re-run hardening until MIN_SCORE_DELTA is no longer met.
+# MAX_ITERATIONS: maximum number of hardening iterations.
+# MIN_SCORE_DELTA: minimum Lynis score improvement to trigger another iteration.
+# ENABLE_REBOOT_TEST: reboot and re-check after hardening.
+# PARALLEL_TESTS: run tests against multiple images concurrently.
+# -----------------------------------------------------------------------------
+KEEP_ON_FAILURE="false"
+ENABLE_ITERATION="true"
+MAX_ITERATIONS=3
+MIN_SCORE_DELTA=1
+ENABLE_REBOOT_TEST="false"
+PARALLEL_TESTS="true"
