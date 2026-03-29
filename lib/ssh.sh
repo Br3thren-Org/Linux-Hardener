@@ -142,6 +142,8 @@ PermitUserEnvironment no
 UsePAM yes
 LogLevel VERBOSE
 Banner /etc/issue.net
+MaxStartups 10:30:60
+AllowStreamLocalForwarding no
 EOF
 )"
 

@@ -116,6 +116,45 @@ packages_apply() {
         fi
     done
 
+    # --- install security-enhancing packages ---
+    case "${DISTRO_FAMILY}" in
+        debian)
+            local security_pkgs=(libpam-tmpdir needrestart debsums apt-show-versions acct sysstat)
+            for pkg in "${security_pkgs[@]}"; do
+                if ! pkg_is_installed "${pkg}"; then
+                    if should_write; then
+                        pkg_install "${pkg}" || log_warn "Could not install ${pkg}"
+                        log_change "Installed ${pkg}" "Lynis-recommended security package" "low"
+                    else
+                        log_info "[DRY-RUN] Would install security package: ${pkg}"
+                        (( CHANGES_SKIPPED++ )) || true
+                    fi
+                else
+                    log_debug "packages_apply: ${pkg} already installed (OK)"
+                fi
+            done
+            ;;
+        rhel)
+            local rhel_security_pkgs=(psacct sysstat)
+            for pkg in "${rhel_security_pkgs[@]}"; do
+                if ! pkg_is_installed "${pkg}"; then
+                    if should_write; then
+                        pkg_install "${pkg}" || log_warn "Could not install ${pkg}"
+                        log_change "Installed ${pkg}" "Lynis-recommended security package" "low"
+                    else
+                        log_info "[DRY-RUN] Would install security package: ${pkg}"
+                        (( CHANGES_SKIPPED++ )) || true
+                    fi
+                else
+                    log_debug "packages_apply: ${pkg} already installed (OK)"
+                fi
+            done
+            ;;
+        *)
+            log_debug "packages_apply: no security-enhancing packages defined for DISTRO_FAMILY '${DISTRO_FAMILY}'"
+            ;;
+    esac
+
     # --- configure unattended upgrades ---
     case "${DISTRO_FAMILY}" in
         debian)

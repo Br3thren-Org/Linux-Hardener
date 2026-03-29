@@ -7,7 +7,10 @@
 
 readonly AUTH_TIMEOUT_FILE="/etc/profile.d/99-hardener-timeout.sh"
 readonly AUTH_USB_CONF="/etc/modprobe.d/99-hardener-usb.conf"
+readonly AUTH_FIREWIRE_CONF="/etc/modprobe.d/99-hardener-firewire.conf"
+readonly AUTH_PROTOCOLS_CONF="/etc/modprobe.d/99-hardener-protocols.conf"
 readonly AUTH_PWQUALITY_CONF="/etc/security/pwquality.conf"
+readonly AUTH_LOGIN_DEFS="/etc/login.defs"
 
 # ─── Audit ────────────────────────────────────────────────────────────────────
 
@@ -19,6 +22,7 @@ auth_audit() {
     _auth_audit_shell_timeout
     _auth_audit_usb_storage
     _auth_audit_password_policy
+    _auth_audit_login_defs
 }
 
 _auth_audit_login_banner() {
@@ -114,7 +118,10 @@ auth_apply() {
     _auth_apply_cron_restrict
     _auth_apply_shell_timeout
     _auth_apply_usb_blacklist
+    _auth_apply_firewire_blacklist
+    _auth_apply_protocol_blacklist
     _auth_apply_password_policy
+    _auth_apply_login_defs
 }
 
 _auth_apply_login_banner() {
@@ -256,6 +263,58 @@ EOF
         "rm -f ${AUTH_USB_CONF}"
 }
 
+_auth_apply_firewire_blacklist() {
+    local content
+    content="$(cat <<'EOF'
+# Hardener: disable firewire storage (STRG-1846)
+blacklist firewire-ohci
+blacklist firewire-sbp2
+install firewire-ohci /bin/true
+install firewire-sbp2 /bin/true
+EOF
+)"
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would blacklist firewire modules in ${AUTH_FIREWIRE_CONF}"
+        return 0
+    fi
+
+    write_file_if_changed "${AUTH_FIREWIRE_CONF}" "${content}" "Blacklist firewire kernel modules"
+
+    log_change \
+        "firewire-ohci and firewire-sbp2 blacklisted via ${AUTH_FIREWIRE_CONF}" \
+        "Prevent firewire storage access on cloud VPS (Lynis STRG-1846)" \
+        "low" \
+        "cat ${AUTH_FIREWIRE_CONF}" \
+        "rm -f ${AUTH_FIREWIRE_CONF}"
+}
+
+_auth_apply_protocol_blacklist() {
+    local content
+    content="$(cat <<'EOF'
+# Hardener: disable uncommon network protocols (NETW-3200)
+install dccp /bin/true
+install sctp /bin/true
+install rds /bin/true
+install tipc /bin/true
+EOF
+)"
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would blacklist uncommon network protocols in ${AUTH_PROTOCOLS_CONF}"
+        return 0
+    fi
+
+    write_file_if_changed "${AUTH_PROTOCOLS_CONF}" "${content}" "Blacklist uncommon network protocol modules"
+
+    log_change \
+        "dccp, sctp, rds, tipc disabled via ${AUTH_PROTOCOLS_CONF}" \
+        "Reduce kernel attack surface by disabling unused network protocols (Lynis NETW-3200)" \
+        "low" \
+        "cat ${AUTH_PROTOCOLS_CONF}" \
+        "rm -f ${AUTH_PROTOCOLS_CONF}"
+}
+
 _auth_apply_password_policy() {
     if [[ "${ENABLE_PASSWORD_POLICY:-false}" != "true" ]]; then
         log_info "auth_apply: password policy skipped (ENABLE_PASSWORD_POLICY != true)"
@@ -300,6 +359,85 @@ EOF
         "rm -f ${AUTH_PWQUALITY_CONF}"
 }
 
+_auth_audit_login_defs() {
+    if [[ ! -f "${AUTH_LOGIN_DEFS}" ]]; then
+        log_debug "auth_audit: ${AUTH_LOGIN_DEFS} not found, skipping login.defs checks"
+        return 0
+    fi
+
+    local -A expected_vals=(
+        [SHA_CRYPT_ROUNDS]=5000
+        [PASS_MIN_DAYS]=1
+        [PASS_MAX_DAYS]=365
+        [PASS_WARN_AGE]=14
+        [UMASK]=027
+    )
+
+    local key expected current
+    for key in "${!expected_vals[@]}"; do
+        expected="${expected_vals[${key}]}"
+        current="$(grep -E "^[[:space:]]*${key}[[:space:]]" "${AUTH_LOGIN_DEFS}" 2>/dev/null | awk '{print $2}' | tail -1)"
+        if [[ -z "${current}" || "${current}" != "${expected}" ]]; then
+            log_warn "FINDING: ${AUTH_LOGIN_DEFS} ${key}='${current:-unset}', expected '${expected}'"
+            (( AUDIT_FINDINGS++ )) || true
+        else
+            log_debug "auth_audit: ${AUTH_LOGIN_DEFS} ${key}=${current} (OK)"
+        fi
+    done
+}
+
+# _auth_set_login_defs_value — idempotent setter for a key in /etc/login.defs
+# If the key exists (commented or uncommented), replace the line; otherwise append.
+_auth_set_login_defs_value() {
+    local key="${1}"
+    local value="${2}"
+
+    local current
+    current="$(grep -E "^[[:space:]]*${key}[[:space:]]" "${AUTH_LOGIN_DEFS}" 2>/dev/null | awk '{print $2}' | tail -1)"
+
+    if [[ "${current}" == "${value}" ]]; then
+        log_debug "_auth_set_login_defs_value: ${key}=${value} already set (OK)"
+        return 0
+    fi
+
+    log_info "auth_apply: setting ${key}=${value} in ${AUTH_LOGIN_DEFS} (was '${current:-unset}')"
+
+    if grep -qE "^[[:space:]#]*${key}[[:space:]]" "${AUTH_LOGIN_DEFS}" 2>/dev/null; then
+        # Replace existing (or commented-out) line
+        sed -i "s|^[[:space:]#]*${key}[[:space:]].*|${key}\t${value}|" "${AUTH_LOGIN_DEFS}"
+    else
+        # Append new entry
+        printf '\n%s\t%s\n' "${key}" "${value}" >> "${AUTH_LOGIN_DEFS}"
+    fi
+}
+
+_auth_apply_login_defs() {
+    if [[ ! -f "${AUTH_LOGIN_DEFS}" ]]; then
+        log_warn "auth_apply: ${AUTH_LOGIN_DEFS} not found, skipping login.defs hardening"
+        return 0
+    fi
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would harden ${AUTH_LOGIN_DEFS} (SHA_CRYPT_ROUNDS, PASS_MIN/MAX_DAYS, PASS_WARN_AGE, UMASK)"
+        return 0
+    fi
+
+    backup_file "${AUTH_LOGIN_DEFS}"
+
+    _auth_set_login_defs_value "SHA_CRYPT_ROUNDS" "5000"
+    _auth_set_login_defs_value "PASS_MIN_DAYS"    "1"
+    _auth_set_login_defs_value "PASS_MAX_DAYS"    "365"
+    _auth_set_login_defs_value "PASS_WARN_AGE"    "14"
+    _auth_set_login_defs_value "UMASK"            "027"
+
+    log_change \
+        "Hardened ${AUTH_LOGIN_DEFS}: SHA_CRYPT_ROUNDS, PASS_MIN/MAX_DAYS, PASS_WARN_AGE, UMASK" \
+        "Apply password ageing policy and secure default umask (Lynis AUTH-9230/9286/9328)" \
+        "medium" \
+        "grep -E 'SHA_CRYPT_ROUNDS|PASS_MIN_DAYS|PASS_MAX_DAYS|PASS_WARN_AGE|^UMASK' ${AUTH_LOGIN_DEFS}" \
+        "restore_file ${AUTH_LOGIN_DEFS}"
+}
+
 # ─── Rollback ─────────────────────────────────────────────────────────────────
 
 auth_rollback() {
@@ -311,6 +449,7 @@ auth_rollback() {
         "/etc/cron.allow"
         "/etc/at.allow"
         "${AUTH_PWQUALITY_CONF}"
+        "${AUTH_LOGIN_DEFS}"
     )
 
     local target
@@ -327,6 +466,16 @@ auth_rollback() {
     if [[ -f "${AUTH_USB_CONF}" ]]; then
         rm -f "${AUTH_USB_CONF}"
         log_info "auth_rollback: removed ${AUTH_USB_CONF}"
+    fi
+
+    if [[ -f "${AUTH_FIREWIRE_CONF}" ]]; then
+        rm -f "${AUTH_FIREWIRE_CONF}"
+        log_info "auth_rollback: removed ${AUTH_FIREWIRE_CONF}"
+    fi
+
+    if [[ -f "${AUTH_PROTOCOLS_CONF}" ]]; then
+        rm -f "${AUTH_PROTOCOLS_CONF}"
+        log_info "auth_rollback: removed ${AUTH_PROTOCOLS_CONF}"
     fi
 
     log_success "auth: rollback complete"

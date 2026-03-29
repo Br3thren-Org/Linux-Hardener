@@ -118,6 +118,12 @@ EOF
             return 1
         fi
 
+        # DEB-0880: copy jail.conf to jail.local to prevent update overwriting
+        if [[ -f /etc/fail2ban/jail.conf ]] && [[ ! -f /etc/fail2ban/jail.local ]]; then
+            cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
+            log_info "integrity_apply: copied jail.conf to jail.local for update protection (Lynis DEB-0880)"
+        fi
+
         # Enable and restart fail2ban
         systemctl enable fail2ban 2>/dev/null || {
             log_warn "integrity_apply: failed to enable fail2ban service"

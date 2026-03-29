@@ -31,7 +31,9 @@ readonly -a SYSCTL_SETTINGS=(
     "net.ipv4.icmp_ignore_bogus_error_responses=1"
     "kernel.randomize_va_space=2"
     "kernel.yama.ptrace_scope=1"
+    "kernel.sysrq=0"
     "fs.suid_dumpable=0"
+    "net.ipv4.tcp_timestamps=0"
 )
 
 # ─── Conditional Settings ─────────────────────────────────────────────────────
