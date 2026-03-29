@@ -149,9 +149,13 @@ load_config() {
 
     apply_profile_defaults
 
-    # Scan for unfilled placeholders
+    # Scan for unfilled placeholders (skip comment lines)
     local placeholders=()
     while IFS= read -r line; do
+        local trimmed="${line#"${line%%[![:space:]]*}"}"
+        if [[ "${trimmed}" == "#"* ]]; then
+            continue
+        fi
         if [[ "${line}" == *"__PLACEHOLDER__"* ]]; then
             placeholders+=("${line}")
         fi
