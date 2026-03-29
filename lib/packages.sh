@@ -119,7 +119,7 @@ packages_apply() {
     # --- install security-enhancing packages ---
     case "${DISTRO_FAMILY}" in
         debian)
-            local security_pkgs=(libpam-tmpdir needrestart debsums apt-show-versions acct sysstat)
+            local security_pkgs=(libpam-tmpdir needrestart debsums apt-show-versions acct sysstat apt-listbugs apt-listchanges)
             for pkg in "${security_pkgs[@]}"; do
                 if ! pkg_is_installed "${pkg}"; then
                     if should_write; then
@@ -154,6 +154,30 @@ packages_apply() {
             log_debug "packages_apply: no security-enhancing packages defined for DISTRO_FAMILY '${DISTRO_FAMILY}'"
             ;;
     esac
+
+    # --- enable sysstat collection ---
+    if should_write && pkg_is_installed sysstat; then
+        if [[ -f /etc/default/sysstat ]]; then
+            sed -i 's/^ENABLED="false"/ENABLED="true"/' /etc/default/sysstat
+        fi
+        systemctl enable sysstat 2>/dev/null || true
+        systemctl start sysstat 2>/dev/null || true
+        log_info "Enabled sysstat data collection"
+    fi
+
+    # --- restrict compiler access (HRDN-7222) ---
+    if should_write; then
+        for compiler in /usr/bin/gcc /usr/bin/g++ /usr/bin/cc; do
+            if [[ -f "${compiler}" ]] && [[ ! -L "${compiler}" ]]; then
+                local current_mode
+                current_mode="$(stat -c '%a' "${compiler}" 2>/dev/null)"
+                if [[ "${current_mode}" != "700" ]]; then
+                    chmod 700 "${compiler}" 2>/dev/null || true
+                    log_change "Restricted ${compiler} to root only (was ${current_mode})" "HRDN-7222: limit compiler access" "low"
+                fi
+            fi
+        done
+    fi
 
     # --- configure unattended upgrades ---
     case "${DISTRO_FAMILY}" in

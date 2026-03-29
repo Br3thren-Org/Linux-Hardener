@@ -134,7 +134,9 @@ AllowTcpForwarding ${SSH_ALLOW_TCP_FORWARDING:-no}
 AllowAgentForwarding ${SSH_ALLOW_AGENT_FORWARDING:-no}
 ClientAliveInterval 300
 ClientAliveCountMax 2
-MaxSessions 3
+MaxSessions 2
+Compression no
+TCPKeepAlive no
 PermitEmptyPasswords no
 HostbasedAuthentication no
 IgnoreRhosts yes
