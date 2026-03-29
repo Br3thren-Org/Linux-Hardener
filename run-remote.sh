@@ -100,18 +100,31 @@ fi
 # ─── SSH Helpers ─────────────────────────────────────────────────────────────
 
 remote_exec() {
+    local ssh_base=(
+        ssh
+        -i "${SSH_KEY_PATH}" -p "${SSH_PORT}"
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ConnectTimeout=10 -o BatchMode=yes
+    )
     if [[ "${USER}" == "root" ]]; then
-        ssh \
-            -i "${SSH_KEY_PATH}" -p "${SSH_PORT}" \
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=10 -o BatchMode=yes \
-            "root@${HOST}" "$@"
+        "${ssh_base[@]}" "root@${HOST}" "$@"
     else
-        ssh \
-            -i "${SSH_KEY_PATH}" -p "${SSH_PORT}" \
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=10 -o BatchMode=yes \
-            "${USER}@${HOST}" sudo "$@"
+        "${ssh_base[@]}" "${USER}@${HOST}" sudo "$@"
+    fi
+}
+
+# remote_exec_script — pipe a script to remote bash via stdin (handles multi-line safely)
+remote_exec_script() {
+    local ssh_base=(
+        ssh
+        -i "${SSH_KEY_PATH}" -p "${SSH_PORT}"
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ConnectTimeout=10 -o BatchMode=yes
+    )
+    if [[ "${USER}" == "root" ]]; then
+        "${ssh_base[@]}" "root@${HOST}" bash -s
+    else
+        "${ssh_base[@]}" "${USER}@${HOST}" sudo bash -s
     fi
 }
 
@@ -202,40 +215,42 @@ if [[ -n "${PROVISION_USER}" ]]; then
 
     # Create user, set up SSH key, grant passwordless sudo — all in one remote call
     # This runs as the INITIAL user (root or sudo-capable user provided via --user/--key)
-    remote_exec bash -c "
-        set -euo pipefail
+    # Uses heredoc piped to remote_exec_script to handle multi-line safely
+    remote_exec_script <<PROVISION_EOF
+set -euo pipefail
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:\${PATH}"
 
-        NEW_USER='${PROVISION_USER}'
+NEW_USER='${PROVISION_USER}'
 
-        # Create user if not exists
-        if ! id \"\${NEW_USER}\" &>/dev/null; then
-            useradd -m -s /bin/bash \"\${NEW_USER}\"
-            echo \"  Created user: \${NEW_USER}\"
-        else
-            echo \"  User already exists: \${NEW_USER}\"
-        fi
+# Create user if not exists
+if ! id "\${NEW_USER}" &>/dev/null; then
+    useradd -m -s /bin/bash "\${NEW_USER}"
+    echo "  Created user: \${NEW_USER}"
+else
+    echo "  User already exists: \${NEW_USER}"
+fi
 
-        # Set up SSH authorized_keys
-        SSHDIR=\"/home/\${NEW_USER}/.ssh\"
-        mkdir -p \"\${SSHDIR}\"
-        chmod 700 \"\${SSHDIR}\"
+# Set up SSH authorized_keys
+SSHDIR="/home/\${NEW_USER}/.ssh"
+mkdir -p "\${SSHDIR}"
+chmod 700 "\${SSHDIR}"
 
-        PUBKEY='${PROVISION_PUBKEY}'
-        if ! grep -qF \"\${PUBKEY}\" \"\${SSHDIR}/authorized_keys\" 2>/dev/null; then
-            echo \"\${PUBKEY}\" >> \"\${SSHDIR}/authorized_keys\"
-            echo \"  Added SSH public key\"
-        else
-            echo \"  SSH key already present\"
-        fi
-        chmod 600 \"\${SSHDIR}/authorized_keys\"
-        chown -R \"\${NEW_USER}:\${NEW_USER}\" \"\${SSHDIR}\"
+PUBKEY='${PROVISION_PUBKEY}'
+if ! grep -qF "\${PUBKEY}" "\${SSHDIR}/authorized_keys" 2>/dev/null; then
+    echo "\${PUBKEY}" >> "\${SSHDIR}/authorized_keys"
+    echo "  Added SSH public key"
+else
+    echo "  SSH key already present"
+fi
+chmod 600 "\${SSHDIR}/authorized_keys"
+chown -R "\${NEW_USER}:\${NEW_USER}" "\${SSHDIR}"
 
-        # Grant passwordless sudo
-        SUDOFILE=\"/etc/sudoers.d/90-hardener-\${NEW_USER}\"
-        echo \"\${NEW_USER} ALL=(ALL) NOPASSWD:ALL\" > \"\${SUDOFILE}\"
-        chmod 440 \"\${SUDOFILE}\"
-        echo \"  Granted passwordless sudo via \${SUDOFILE}\"
-    "
+# Grant passwordless sudo
+SUDOFILE="/etc/sudoers.d/90-hardener-\${NEW_USER}"
+echo "\${NEW_USER} ALL=(ALL) NOPASSWD:ALL" > "\${SUDOFILE}"
+chmod 440 "\${SUDOFILE}"
+echo "  Granted passwordless sudo via \${SUDOFILE}"
+PROVISION_EOF
 
     # Verify we can connect as the new user
     printf '  Verifying SSH as %s...\n' "${PROVISION_USER}"
@@ -281,6 +296,7 @@ fi
 
 printf '[2/8] Copying framework to target...\n'
 remote_exec mkdir -p "${REMOTE_DIR}"
+remote_exec chown "${USER}:${USER}" "${REMOTE_DIR}"
 remote_copy_to "${SCRIPT_DIR}/lib/"      "${REMOTE_DIR}/lib"
 remote_copy_to "${SCRIPT_DIR}/scripts/"  "${REMOTE_DIR}/scripts"
 remote_copy_to "${SCRIPT_DIR}/config/"   "${REMOTE_DIR}/config"
@@ -288,7 +304,9 @@ remote_copy_to "${SCRIPT_DIR}/harden.sh" "${REMOTE_DIR}/harden.sh"
 remote_exec chmod +x "${REMOTE_DIR}/harden.sh" "${REMOTE_DIR}/scripts/lynis_runner.sh" "${REMOTE_DIR}/scripts/validate.sh"
 
 # Ensure python3 is available
-remote_exec bash -c "command -v python3 || (apt-get update -y && apt-get install -y python3 || dnf install -y python3)" &>/dev/null || true
+remote_exec_script <<'BOOTSTRAP_EOF'
+command -v python3 || (apt-get update -y && apt-get install -y python3 || dnf install -y python3)
+BOOTSTRAP_EOF
 printf '  Done.\n\n'
 
 # ─── Step 3: Pre-Hardening Lynis ────────────────────────────────────────────
