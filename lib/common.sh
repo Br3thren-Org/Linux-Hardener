@@ -171,19 +171,21 @@ load_config() {
 }
 
 apply_profile_defaults() {
-    case "${HARDENING_PROFILE:-}" in
+    case "${HARDENING_PROFILE:-aggressive}" in
         standard)
-            : "${ENABLE_AIDE:=false}"
-            : "${ENABLE_AUDITD:=false}"
-            : "${ENABLE_APPARMOR:=false}"
+            : "${NOEXEC_TMP:=false}"
+            : "${ENABLE_PASSWORD_POLICY:=false}"
             : "${ENABLE_FAIL2BAN:=false}"
+            : "${ENABLE_AUDITD:=false}"
+            : "${ENABLE_AIDE:=false}"
             : "${ENABLE_UNATTENDED_UPGRADES:=false}"
             ;;
-        aggressive)
-            : "${ENABLE_AIDE:=true}"
-            : "${ENABLE_AUDITD:=true}"
-            : "${ENABLE_APPARMOR:=true}"
+        aggressive|*)
+            : "${NOEXEC_TMP:=true}"
+            : "${ENABLE_PASSWORD_POLICY:=true}"
             : "${ENABLE_FAIL2BAN:=true}"
+            : "${ENABLE_AUDITD:=true}"
+            : "${ENABLE_AIDE:=true}"
             : "${ENABLE_UNATTENDED_UPGRADES:=true}"
             ;;
     esac
