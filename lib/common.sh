@@ -65,9 +65,9 @@ log_success() { log_msg "SUCCESS" "${1}"; }
 log_change() {
     local what="${1}"
     local why="${2}"
-    local risk="${3}"
-    local validation="${4}"
-    local rollback="${5}"
+    local risk="${3:-low}"
+    local validation="${4:-}"
+    local rollback="${5:-}"
     local timestamp
     timestamp="$(date '+%Y-%m-%dT%H:%M:%S')"
 
