@@ -10,16 +10,16 @@ readonly HARDENER_LOG_DIR="/var/log/linux-hardener"
 
 # ─── Globals (populated by init functions) ───────────────────────────────────
 
-DISTRO_FAMILY=""    # "debian" or "rhel"
-DISTRO_ID=""        # "debian", "ubuntu", "rocky", "almalinux"
-DISTRO_VERSION=""   # "12", "24.04", "9"
-DISTRO_CODENAME=""  # "bookworm", "noble", etc.
-RUN_MODE=""         # "audit", "dry-run", "apply", "rollback"
-BACKUP_DIR=""
-LOG_FILE=""
-CONFIG_FILE=""
-VERBOSE="false"
-MODULE_FILTER=""
+: "${DISTRO_FAMILY:=}"    # "debian" or "rhel"
+: "${DISTRO_ID:=}"        # "debian", "ubuntu", "rocky", "almalinux"
+: "${DISTRO_VERSION:=}"   # "12", "24.04", "9"
+: "${DISTRO_CODENAME:=}"  # "bookworm", "noble", etc.
+: "${RUN_MODE:=}"         # "audit", "dry-run", "apply", "rollback"
+: "${BACKUP_DIR:=}"
+: "${LOG_FILE:=}"
+: "${CONFIG_FILE:=}"
+: "${VERBOSE:=false}"
+: "${MODULE_FILTER:=}"
 declare -g CHANGES_APPLIED=0
 declare -g CHANGES_SKIPPED=0
 declare -g CHANGES_FAILED=0
