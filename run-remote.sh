@@ -188,7 +188,7 @@ if [[ -n "${PROVISION_USER}" ]]; then
 
     # Generate a dedicated keypair for the new user
     if [[ ! -f "${PROVISION_KEY_PATH}" ]]; then
-        ssh-keygen -t ed25519 -f "${PROVISION_KEY_PATH}" -N "" \
+        ssh-keygen -t rsa -b 4096 -f "${PROVISION_KEY_PATH}" -N "" \
             -C "${PROVISION_USER}@${HOST}-hardener" > /dev/null 2>&1
         printf '  Generated keypair: %s\n' "${PROVISION_KEY_PATH}"
     else
