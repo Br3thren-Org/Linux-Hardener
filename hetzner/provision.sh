@@ -125,20 +125,33 @@ create_server() {
     if [[ "${used_hcloud}" == "false" ]]; then
         # hetzner_api_create_server returns "id|ip" on stdout
         local api_response
-        api_response="$(
+        if ! api_response="$(
             hetzner_api_create_server \
                 "${server_name}" \
                 "${HETZNER_SERVER_TYPE}" \
                 "${image}" \
                 "${HETZNER_LOCATION}" \
                 "${HETZNER_SSH_KEY_NAME}"
-        )"
+        )"; then
+            printf '[ERROR] Failed to create server %s via API\n' "${server_name}" >&2
+            return 1
+        fi
 
         server_id="$(printf '%s' "${api_response}" | cut -d'|' -f1)"
+        if [[ -z "${server_id}" ]]; then
+            printf '[ERROR] API returned empty server ID for %s\n' "${server_name}" >&2
+            return 1
+        fi
+
         # Wait until server reaches "running" state, then fetch confirmed IP
         hetzner_api_wait_running "${server_id}"
 
         server_ip="$(hetzner_api_get_ip "${server_id}")"
+        if [[ -z "${server_ip}" ]]; then
+            printf '[ERROR] Could not get IP for server %s (id=%s)\n' "${server_name}" "${server_id}" >&2
+            return 1
+        fi
+
         printf '[INFO] API created server id=%s ip=%s\n' "${server_id}" "${server_ip}" >&2
     fi
 

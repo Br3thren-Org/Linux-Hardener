@@ -23,17 +23,31 @@ hetzner_api() {
 
     local url="${HETZNER_API_BASE}${endpoint}"
     local curl_args=(
-        -sf
+        -sS
         -X "${method}"
         -H "Authorization: Bearer ${HETZNER_API_TOKEN}"
         -H "Content-Type: application/json"
+        -w '\n%{http_code}'
     )
 
     if [[ -n "${data}" ]]; then
         curl_args+=(-d "${data}")
     fi
 
-    curl "${curl_args[@]}" "${url}"
+    local raw_output
+    raw_output="$(curl "${curl_args[@]}" "${url}" 2>/dev/null)" || true
+
+    local http_code
+    http_code="$(printf '%s' "${raw_output}" | tail -1)"
+    local response
+    response="$(printf '%s' "${raw_output}" | sed '$d')"
+
+    if [[ -z "${http_code}" ]] || [[ "${http_code}" -ge 400 ]] 2>/dev/null; then
+        printf 'ERROR: API %s %s returned HTTP %s: %s\n' "${method}" "${endpoint}" "${http_code:-000}" "${response}" >&2
+        return 1
+    fi
+
+    printf '%s' "${response}"
 }
 
 # ─── Server Lifecycle ────────────────────────────────────────────────────────
