@@ -173,7 +173,13 @@ EOF
     log_debug "ssh_apply: set permissions 600 on ${SSH_DROPIN_PATH}"
 
     # --- Validate config before reloading ---
-    # Wait for any in-flight sshd restart (e.g., from openssh package upgrade) to finish
+    # Ensure privilege separation directory exists (Ubuntu removes it during openssh upgrades)
+    if [[ ! -d /run/sshd ]]; then
+        mkdir -p /run/sshd
+        chmod 0755 /run/sshd
+        log_debug "ssh_apply: created missing /run/sshd"
+    fi
+
     log_info "ssh_apply: validating configuration with 'sshd -t'"
     local validate_ok="false"
     local attempt
