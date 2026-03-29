@@ -274,6 +274,7 @@ debian_install_lynis() {
                 log_info "[DRY-RUN] Would run: apt-get install -y lynis"
                 return 0
             fi
+            DEBIAN_FRONTEND=noninteractive apt-get update -y
             pkg_install lynis
             log_success "Lynis installed via apt"
             ;;
