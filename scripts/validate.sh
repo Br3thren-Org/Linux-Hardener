@@ -104,8 +104,9 @@ run_checks() {
         "getent hosts example.com | head -1" \
         ""
 
+    # Use python3 as ultimate fallback — always available since we install it during bootstrap
     check "Outbound HTTPS" \
-        "curl -sf -o /dev/null --connect-timeout 10 https://example.com 2>/dev/null || wget -q --spider --timeout=10 https://example.com 2>/dev/null" \
+        "curl -sf -o /dev/null --connect-timeout 10 https://example.com 2>/dev/null || wget -q --spider --timeout=10 https://example.com 2>/dev/null || python3 -c 'import urllib.request; urllib.request.urlopen(\"https://example.com\", timeout=10)' 2>/dev/null" \
         ""
 
     # ── Package Manager ───────────────────────────────────────────────────────

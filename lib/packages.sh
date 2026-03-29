@@ -135,7 +135,7 @@ packages_apply() {
             done
             ;;
         rhel)
-            local rhel_security_pkgs=(psacct sysstat)
+            local rhel_security_pkgs=(psacct sysstat curl)
             for pkg in "${rhel_security_pkgs[@]}"; do
                 if ! pkg_is_installed "${pkg}"; then
                     if should_write; then

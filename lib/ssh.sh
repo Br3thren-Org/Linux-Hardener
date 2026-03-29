@@ -125,7 +125,7 @@ ssh_apply() {
 
 PermitRootLogin ${SSH_PERMIT_ROOT_LOGIN:-prohibit-password}
 PasswordAuthentication ${SSH_PASSWORD_AUTH:-no}
-ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
 MaxAuthTries 3
 LoginGraceTime 30
 PubkeyAuthentication yes
@@ -173,13 +173,19 @@ EOF
     log_debug "ssh_apply: set permissions 600 on ${SSH_DROPIN_PATH}"
 
     # --- Validate config before reloading ---
-    # Retry once after 2s — package upgrades can leave sshd in a transient state
+    # Wait for any in-flight sshd restart (e.g., from openssh package upgrade) to finish
     log_info "ssh_apply: validating configuration with 'sshd -t'"
-    if ! sshd -t 2>/tmp/sshd_validate_err; then
-        log_warn "ssh_apply: first sshd -t attempt failed, retrying in 2s..."
-        sleep 2
-    fi
-    if ! sshd -t 2>/tmp/sshd_validate_err; then
+    local validate_ok="false"
+    local attempt
+    for attempt in 1 2 3; do
+        if sshd -t 2>/tmp/sshd_validate_err; then
+            validate_ok="true"
+            break
+        fi
+        log_warn "ssh_apply: sshd -t attempt ${attempt} failed, retrying in 3s..."
+        sleep 3
+    done
+    if [[ "${validate_ok}" != "true" ]]; then
         local err_output
         err_output="$(cat /tmp/sshd_validate_err)"
         log_error "ssh_apply: sshd -t validation FAILED — reverting drop-in"
