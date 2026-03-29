@@ -190,8 +190,11 @@ if [[ -n "${PROVISION_USER}" ]]; then
     if [[ ! -f "${PROVISION_KEY_PATH}" ]]; then
         ssh-keygen -t rsa -b 4096 -f "${PROVISION_KEY_PATH}" -N "" \
             -C "${PROVISION_USER}@${HOST}-hardener" > /dev/null 2>&1
+        chmod 600 "${PROVISION_KEY_PATH}"
+        chmod 644 "${PROVISION_KEY_PATH}.pub"
         printf '  Generated keypair: %s\n' "${PROVISION_KEY_PATH}"
     else
+        chmod 600 "${PROVISION_KEY_PATH}"
         printf '  Keypair already exists: %s\n' "${PROVISION_KEY_PATH}"
     fi
 
