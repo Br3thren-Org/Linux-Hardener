@@ -173,7 +173,12 @@ EOF
     log_debug "ssh_apply: set permissions 600 on ${SSH_DROPIN_PATH}"
 
     # --- Validate config before reloading ---
+    # Retry once after 2s — package upgrades can leave sshd in a transient state
     log_info "ssh_apply: validating configuration with 'sshd -t'"
+    if ! sshd -t 2>/tmp/sshd_validate_err; then
+        log_warn "ssh_apply: first sshd -t attempt failed, retrying in 2s..."
+        sleep 2
+    fi
     if ! sshd -t 2>/tmp/sshd_validate_err; then
         local err_output
         err_output="$(cat /tmp/sshd_validate_err)"

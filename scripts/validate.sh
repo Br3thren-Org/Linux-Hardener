@@ -101,7 +101,7 @@ run_checks() {
     section "Connectivity"
 
     check "DNS resolution" \
-        "dig +short +timeout=5 example.com | head -1" \
+        "getent hosts example.com | head -1" \
         ""
 
     check "Outbound HTTPS" \
