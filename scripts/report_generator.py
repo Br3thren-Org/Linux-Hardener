@@ -6,6 +6,40 @@ Linux-Hardener Lynis summary JSON files.
 Usage:
     report_generator.py <summary_json> <output_dir>
     report_generator.py --aggregate <artifacts_dir> <output_dir>
+
+Summary JSON schema (produced by lynis_parser.py):
+    {
+      "timestamp":     "<ISO-8601>",
+      "distro":        "<distro-string>",
+      "lynis_version": "<version>",
+      "pre": {
+        "hardening_index":    <int>,
+        "tests_performed":    <int>,
+        "warnings_count":     <int>,
+        "suggestions_count":  <int>
+      },
+      "post": { ...same keys... },
+      "delta": {
+        "hardening_index_delta":    "<+N or -N>",
+        "hardening_index_numeric":  <int>,
+        "warnings_resolved":        <int>,
+        "warnings_resolved_ids":    [...],
+        "new_warnings":             <int>,
+        "new_warnings_ids":         [...],
+        "suggestions_resolved":     <int>,
+        "suggestions_resolved_ids": [...],
+        "new_suggestions":          <int>,
+        "new_suggestions_ids":      [...]
+      },
+      "remaining": {
+        "warnings":     { "count": <int>, "findings": [...] },
+        "suggestions":  { "count": <int>, "findings": [...] }
+      },
+      "classification": {
+        "warnings":    { "safe_to_remediate": [...], "not_applicable": [...], "needs_human_review": [...] },
+        "suggestions": { "safe_to_remediate": [...], "not_applicable": [...], "needs_human_review": [...] }
+      }
+    }
 """
 
 import json
@@ -118,25 +152,43 @@ def _section_header(title: str) -> str:
     return f"\n{bar}\n  {title}\n{bar}"
 
 
-def _bullet(text: str, indent: int = 2) -> str:
-    prefix = " " * indent + "• "
-    wrap_width = BOX_WIDTH - indent - 2
+def _wrap_text(text: str, indent: int, total_width: int) -> list[str]:
+    """Word-wrap *text* to fit within *total_width*, indented by *indent* spaces."""
+    prefix = " " * indent
+    max_line = total_width - indent
     words = text.split()
     lines = []
-    current = prefix
-    continuation = " " * (indent + 2)
+    current = ""
     for word in words:
-        if len(current) + len(word) + 1 > wrap_width + len(prefix):
-            lines.append(current)
-            current = continuation + word
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= max_line:
+            current += " " + word
         else:
-            current = current + (" " if current != prefix else "") + word
-    lines.append(current)
-    return "\n".join(lines)
+            lines.append(prefix + current)
+            current = word
+    if current:
+        lines.append(prefix + current)
+    return lines
 
 
 def _sign(n: int | float) -> str:
     return f"+{n}" if n > 0 else str(n)
+
+
+def _na(value) -> str:
+    return str(value) if value is not None else "N/A"
+
+
+def _item_id(item: dict | str) -> str:
+    """Return a short display identifier for a finding item."""
+    if isinstance(item, dict):
+        tid = item.get("test_id", "")
+        desc = item.get("description", "")
+        if tid and desc:
+            return f"{tid}: {desc}"
+        return tid or desc or str(item)
+    return str(item)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +214,6 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     distro = summary.get("distro", "unknown")
     lynis_version = summary.get("lynis_version", "unknown")
     timestamp = summary.get("timestamp", datetime.now(timezone.utc).isoformat())
-    # Format timestamp for display
     try:
         dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         date_str = dt.strftime("%Y-%m-%d %H:%M UTC")
@@ -186,12 +237,10 @@ def generate_text_report(summary: dict, output_path: str) -> None:
 
     pre_score = pre.get("hardening_index", "N/A")
     post_score = post.get("hardening_index", "N/A")
-    raw_delta = delta.get("hardening_index", "N/A")
-    # Normalise delta to a display string
-    if isinstance(raw_delta, (int, float)):
-        score_delta_str = _sign(raw_delta)
-    else:
-        score_delta_str = str(raw_delta)
+    numeric_delta = delta.get("hardening_index_numeric")
+    score_delta_str = delta.get("hardening_index_delta", "N/A")
+    if numeric_delta is not None and score_delta_str == "N/A":
+        score_delta_str = _sign(numeric_delta)
 
     lines.append(_section_header("SCORE"))
     lines.append(f"  Before : {pre_score}")
@@ -201,8 +250,8 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     # ------------------------------------------------------------------
     # Warnings
     # ------------------------------------------------------------------
-    pre_warn = pre.get("warnings", "N/A")
-    post_warn = post.get("warnings", "N/A")
+    pre_warn = pre.get("warnings_count", "N/A")
+    post_warn = post.get("warnings_count", "N/A")
     resolved_warn = delta.get("warnings_resolved", "N/A")
     new_warn = delta.get("new_warnings", "N/A")
 
@@ -215,8 +264,8 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     # ------------------------------------------------------------------
     # Suggestions
     # ------------------------------------------------------------------
-    pre_sugg = pre.get("suggestions", "N/A")
-    post_sugg = post.get("suggestions", "N/A")
+    pre_sugg = pre.get("suggestions_count", "N/A")
+    post_sugg = post.get("suggestions_count", "N/A")
     resolved_sugg = delta.get("suggestions_resolved", "N/A")
     new_sugg = delta.get("new_suggestions", "N/A")
 
@@ -229,62 +278,41 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     # ------------------------------------------------------------------
     # Remaining classification
     # ------------------------------------------------------------------
+    remaining = summary.get("remaining", {})
     classification = summary.get("classification", {})
-    safe_list = classification.get("safe_to_remediate", [])
-    review_list = classification.get("needs_human_review", [])
-    na_list = classification.get("not_applicable", [])
 
     lines.append(_section_header("REMAINING CLASSIFICATION"))
 
-    # Warnings
-    remaining_warnings = summary.get("remaining", {}).get("warnings", [])
-    remaining_suggestions = summary.get("remaining", {}).get("suggestions", [])
+    for category_key, category_label in [("warnings", "Warnings"), ("suggestions", "Suggestions")]:
+        rem_block = remaining.get(category_key, {})
+        findings = rem_block.get("findings", []) if isinstance(rem_block, dict) else []
+        cls_block = classification.get(category_key, {})
+        safe_items = cls_block.get("safe_to_remediate", [])
+        review_items = cls_block.get("needs_human_review", [])
+        na_items = cls_block.get("not_applicable", [])
 
-    for category_label, items in [
-        ("Warnings", remaining_warnings),
-        ("Suggestions", remaining_suggestions),
-    ]:
-        if not items:
-            continue
         lines.append(f"\n  {category_label}:")
-
-        # Group by classification
-        safe_items = [i for i in items if _classify_item(i, safe_list, review_list, na_list) == "safe"]
-        review_items = [i for i in items if _classify_item(i, safe_list, review_list, na_list) == "review"]
-        na_items = [i for i in items if _classify_item(i, safe_list, review_list, na_list) == "na"]
-        unclassified = [
-            i for i in items
-            if _classify_item(i, safe_list, review_list, na_list) == "unclassified"
-        ]
-
-        lines.append(f"    Safe to remediate    : {len(safe_items)}")
-        lines.append(f"    Needs human review   : {len(review_items)}")
+        lines.append(f"    Safe to remediate  : {len(safe_items)}")
+        lines.append(f"    Needs human review : {len(review_items)}")
         if review_items:
             for item in review_items:
-                item_id = _item_id(item)
-                lines.append(f"      - {item_id}")
-        lines.append(f"    Not applicable       : {len(na_items)}")
+                lines.append(f"      - {_item_id(item)}")
+        lines.append(f"    Not applicable     : {len(na_items)}")
         if na_items:
             for item in na_items:
-                item_id = _item_id(item)
-                lines.append(f"      - {item_id}")
-        if unclassified:
-            lines.append(f"    Unclassified         : {len(unclassified)}")
-            for item in unclassified:
-                item_id = _item_id(item)
-                lines.append(f"      - {item_id}")
+                lines.append(f"      - {_item_id(item)}")
 
-    # Summary counts from top-level classification keys
-    lines.append(f"\n  Overall classification totals:")
-    lines.append(f"    Safe to remediate  : {len(safe_list)}")
-    lines.append(f"    Needs human review : {len(review_list)}")
-    if review_list:
-        for entry in review_list:
-            lines.append(f"      - {_item_id(entry)}")
-    lines.append(f"    Not applicable     : {len(na_list)}")
-    if na_list:
-        for entry in na_list:
-            lines.append(f"      - {_item_id(entry)}")
+        # Any findings not yet classified (edge case: classification list may be
+        # shorter than remaining findings if auto-remediate.conf is absent)
+        classified_ids = set()
+        for group in (safe_items, review_items, na_items):
+            for item in group:
+                classified_ids.add(_item_id(item))
+        unclassified = [f for f in findings if _item_id(f) not in classified_ids]
+        if unclassified:
+            lines.append(f"    Unclassified       : {len(unclassified)}")
+            for item in unclassified:
+                lines.append(f"      - {_item_id(item)}")
 
     # ------------------------------------------------------------------
     # Known trade-offs
@@ -292,7 +320,8 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     lines.append(_section_header("KNOWN TRADE-OFFS"))
     for title, description in KNOWN_TRADE_OFFS:
         lines.append(f"\n  [{title}]")
-        lines.append(_bullet(description, indent=4))
+        for wrapped_line in _wrap_text(description, indent=4, total_width=BOX_WIDTH):
+            lines.append(wrapped_line)
 
     # ------------------------------------------------------------------
     # Intentionally not remediated
@@ -300,7 +329,8 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     lines.append(_section_header("INTENTIONALLY NOT REMEDIATED"))
     for title, reason in INTENTIONALLY_NOT_REMEDIATED:
         lines.append(f"\n  [{title}]")
-        lines.append(_bullet(reason, indent=4))
+        for wrapped_line in _wrap_text(reason, indent=4, total_width=BOX_WIDTH):
+            lines.append(wrapped_line)
 
     # ------------------------------------------------------------------
     # Manual follow-up recommendations
@@ -308,25 +338,30 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     lines.append(_section_header("MANUAL FOLLOW-UP RECOMMENDATIONS"))
     for i, rec in enumerate(MANUAL_FOLLOW_UP, start=1):
         lines.append("")
-        # Wrap long recommendations
-        prefix = f"  {i}. "
-        continuation = " " * len(prefix)
+        prefix_len = len(f"  {i}. ")
+        first_line_prefix = f"  {i}. "
+        continuation_prefix = " " * prefix_len
         words = rec.split()
-        current = prefix
-        wrap_at = BOX_WIDTH - 2
         rec_lines = []
+        current_prefix = first_line_prefix
+        current = ""
         for word in words:
-            if len(current) + len(word) + 1 > wrap_at:
-                rec_lines.append(current)
-                current = continuation + word
+            candidate = (current + " " + word).strip() if current else word
+            if len(current_prefix) + len(candidate) <= BOX_WIDTH - 2:
+                current = candidate
             else:
-                current = current + (" " if current != prefix else "") + word
-        rec_lines.append(current)
+                rec_lines.append(current_prefix + current)
+                current_prefix = continuation_prefix
+                current = word
+        if current:
+            rec_lines.append(current_prefix + current)
         lines.extend(rec_lines)
 
     lines.append("")
     lines.append("═" * (BOX_WIDTH + 2))
-    lines.append(f"  Report generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append(
+        f"  Report generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+    )
     lines.append("═" * (BOX_WIDTH + 2))
     lines.append("")
 
@@ -338,35 +373,6 @@ def generate_text_report(summary: dict, output_path: str) -> None:
     content = "\n".join(lines)
     output.write_text(content, encoding="utf-8")
     print(f"Report written to: {output_path}")
-
-
-# ---------------------------------------------------------------------------
-# Classification helpers
-# ---------------------------------------------------------------------------
-
-
-def _item_id(item: dict | str) -> str:
-    """Return a display identifier for a finding item."""
-    if isinstance(item, dict):
-        return item.get("test_id") or item.get("id") or item.get("description") or str(item)
-    return str(item)
-
-
-def _classify_item(
-    item: dict | str,
-    safe_list: list,
-    review_list: list,
-    na_list: list,
-) -> str:
-    """Return 'safe', 'review', 'na', or 'unclassified'."""
-    item_id = _item_id(item)
-    if any(_item_id(e) == item_id for e in safe_list):
-        return "safe"
-    if any(_item_id(e) == item_id for e in review_list):
-        return "review"
-    if any(_item_id(e) == item_id for e in na_list):
-        return "na"
-    return "unclassified"
 
 
 # ---------------------------------------------------------------------------
@@ -394,10 +400,12 @@ def generate_aggregate(artifacts_dir: str, output_dir: str) -> None:
         print(f"ERROR: artifacts directory not found: {artifacts_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # Collect all summary.json files
     summary_files = sorted(artifacts_path.glob("*/summary.json"))
     if not summary_files:
-        print(f"WARNING: no summary.json files found under {artifacts_dir}", file=sys.stderr)
+        print(
+            f"WARNING: no summary.json files found under {artifacts_dir}",
+            file=sys.stderr,
+        )
 
     distro_results: list[dict] = []
 
@@ -415,22 +423,16 @@ def generate_aggregate(artifacts_dir: str, output_dir: str) -> None:
 
         pre_score = pre.get("hardening_index")
         post_score = post.get("hardening_index")
-        raw_delta = delta.get("hardening_index")
-
-        # Compute numeric delta if not present or is a string like "+29"
-        if isinstance(raw_delta, str):
-            try:
-                numeric_delta = int(raw_delta.lstrip("+"))
-            except ValueError:
-                numeric_delta = None
-        elif isinstance(raw_delta, (int, float)):
-            numeric_delta = int(raw_delta)
-        else:
-            numeric_delta = (
-                (post_score - pre_score)
-                if isinstance(pre_score, (int, float)) and isinstance(post_score, (int, float))
-                else None
-            )
+        numeric_delta = delta.get("hardening_index_numeric")
+        if numeric_delta is None:
+            delta_str = delta.get("hardening_index_delta")
+            if delta_str is not None:
+                try:
+                    numeric_delta = int(str(delta_str).lstrip("+"))
+                except ValueError:
+                    numeric_delta = None
+        if numeric_delta is None and isinstance(pre_score, (int, float)) and isinstance(post_score, (int, float)):
+            numeric_delta = post_score - pre_score
 
         distro_results.append(
             {
@@ -440,10 +442,14 @@ def generate_aggregate(artifacts_dir: str, output_dir: str) -> None:
                 "pre_score": pre_score,
                 "post_score": post_score,
                 "delta": numeric_delta,
-                "pre_warnings": pre.get("warnings"),
-                "post_warnings": post.get("warnings"),
-                "pre_suggestions": pre.get("suggestions"),
-                "post_suggestions": post.get("suggestions"),
+                "pre_warnings": pre.get("warnings_count"),
+                "post_warnings": post.get("warnings_count"),
+                "warnings_resolved": delta.get("warnings_resolved"),
+                "new_warnings": delta.get("new_warnings"),
+                "pre_suggestions": pre.get("suggestions_count"),
+                "post_suggestions": post.get("suggestions_count"),
+                "suggestions_resolved": delta.get("suggestions_resolved"),
+                "new_suggestions": delta.get("new_suggestions"),
                 "source_file": str(summary_file),
             }
         )
@@ -462,41 +468,39 @@ def generate_aggregate(artifacts_dir: str, output_dir: str) -> None:
     agg_file.write_text(json.dumps(aggregate, indent=2), encoding="utf-8")
     print(f"Aggregate summary written to: {agg_file}")
 
-    # ------------------------------------------------------------------
-    # Print formatted table
-    # ------------------------------------------------------------------
     _print_aggregate_table(distro_results)
 
 
 def _print_aggregate_table(results: list[dict]) -> None:
     """Print a formatted summary table to stdout."""
-    col_widths = {
-        "distro": max(12, max((len(r["distro"]) for r in results), default=12)),
-        "lynis": 7,
-        "pre": 5,
-        "post": 5,
-        "delta": 6,
-        "pre_w": 6,
-        "post_w": 6,
-        "pre_s": 6,
-        "post_s": 6,
-    }
+    if not results:
+        print("  (no results to display)")
+        return
 
-    def row(*cells: tuple[str, str]) -> str:
-        return "  ".join(str(v).ljust(w) for v, w in cells)
+    col_w_distro = max(12, max(len(r["distro"]) for r in results))
+    col_w_lynis = max(7, max(len(r.get("lynis_version", "N/A")) for r in results))
 
-    header = row(
-        ("DISTRO", col_widths["distro"]),
-        ("LYNIS", col_widths["lynis"]),
-        ("SCORE↑", col_widths["pre"]),
-        ("SCORE↓", col_widths["post"]),
-        ("DELTA", col_widths["delta"]),
-        ("WARN↑", col_widths["pre_w"]),
-        ("WARN↓", col_widths["post_w"]),
-        ("SUGG↑", col_widths["pre_s"]),
-        ("SUGG↓", col_widths["post_s"]),
-    )
+    COL_NUMERIC = 6
 
+    def cell(v, w: int) -> str:
+        return str(v).ljust(w)
+
+    def header_row() -> str:
+        return "  ".join([
+            cell("DISTRO", col_w_distro),
+            cell("LYNIS", col_w_lynis),
+            cell("PRE", COL_NUMERIC),
+            cell("POST", COL_NUMERIC),
+            cell("DELTA", COL_NUMERIC),
+            cell("W-PRE", COL_NUMERIC),
+            cell("W-PST", COL_NUMERIC),
+            cell("W-RES", COL_NUMERIC),
+            cell("S-PRE", COL_NUMERIC),
+            cell("S-PST", COL_NUMERIC),
+            cell("S-RES", COL_NUMERIC),
+        ])
+
+    header = header_row()
     sep = "─" * len(header)
 
     print()
@@ -506,47 +510,47 @@ def _print_aggregate_table(results: list[dict]) -> None:
     print(f"  {sep}")
 
     for r in results:
-        delta_str = _sign(r["delta"]) if r["delta"] is not None else "N/A"
-        data_row = row(
-            (r["distro"], col_widths["distro"]),
-            (r["lynis_version"], col_widths["lynis"]),
-            (_na(r["pre_score"]), col_widths["pre"]),
-            (_na(r["post_score"]), col_widths["post"]),
-            (delta_str, col_widths["delta"]),
-            (_na(r["pre_warnings"]), col_widths["pre_w"]),
-            (_na(r["post_warnings"]), col_widths["post_w"]),
-            (_na(r["pre_suggestions"]), col_widths["pre_s"]),
-            (_na(r["post_suggestions"]), col_widths["post_s"]),
-        )
-        print(f"  {data_row}")
+        d_str = _sign(r["delta"]) if isinstance(r["delta"], (int, float)) else "N/A"
+        data = "  ".join([
+            cell(r["distro"], col_w_distro),
+            cell(r.get("lynis_version", "N/A"), col_w_lynis),
+            cell(_na(r["pre_score"]), COL_NUMERIC),
+            cell(_na(r["post_score"]), COL_NUMERIC),
+            cell(d_str, COL_NUMERIC),
+            cell(_na(r["pre_warnings"]), COL_NUMERIC),
+            cell(_na(r["post_warnings"]), COL_NUMERIC),
+            cell(_na(r["warnings_resolved"]), COL_NUMERIC),
+            cell(_na(r["pre_suggestions"]), COL_NUMERIC),
+            cell(_na(r["post_suggestions"]), COL_NUMERIC),
+            cell(_na(r["suggestions_resolved"]), COL_NUMERIC),
+        ])
+        print(f"  {data}")
 
     print(f"  {sep}")
 
-    # Averages (numeric only)
-    def _avg(key: str) -> str:
-        vals = [r[key] for r in results if isinstance(r[key], (int, float))]
+    # Averages row (numeric fields only)
+    def avg(key: str) -> str:
+        vals = [r[key] for r in results if isinstance(r.get(key), (int, float))]
         return f"{sum(vals) / len(vals):.1f}" if vals else "N/A"
 
-    avg_row = row(
-        ("AVG", col_widths["distro"]),
-        ("", col_widths["lynis"]),
-        (_avg("pre_score"), col_widths["pre"]),
-        (_avg("post_score"), col_widths["post"]),
-        (_avg("delta"), col_widths["delta"]),
-        (_avg("pre_warnings"), col_widths["pre_w"]),
-        (_avg("post_warnings"), col_widths["post_w"]),
-        (_avg("pre_suggestions"), col_widths["pre_s"]),
-        (_avg("post_suggestions"), col_widths["post_s"]),
-    )
-    print(f"  {avg_row}")
+    avg_data = "  ".join([
+        cell("AVG", col_w_distro),
+        cell("", col_w_lynis),
+        cell(avg("pre_score"), COL_NUMERIC),
+        cell(avg("post_score"), COL_NUMERIC),
+        cell(avg("delta"), COL_NUMERIC),
+        cell(avg("pre_warnings"), COL_NUMERIC),
+        cell(avg("post_warnings"), COL_NUMERIC),
+        cell(avg("warnings_resolved"), COL_NUMERIC),
+        cell(avg("pre_suggestions"), COL_NUMERIC),
+        cell(avg("post_suggestions"), COL_NUMERIC),
+        cell(avg("suggestions_resolved"), COL_NUMERIC),
+    ])
+    print(f"  {avg_data}")
     print(f"  {sep}")
     print()
-    print("  Column key: ↑ = before hardening, ↓ = after hardening")
+    print("  Column key: PRE=before, POST=after, W=warnings, S=suggestions, RES=resolved")
     print()
-
-
-def _na(value) -> str:
-    return str(value) if value is not None else "N/A"
 
 
 # ---------------------------------------------------------------------------
@@ -567,12 +571,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args[0] == "--aggregate":
         if len(args) < 3:
-            print("ERROR: --aggregate requires <artifacts_dir> <output_dir>", file=sys.stderr)
+            print(
+                "ERROR: --aggregate requires <artifacts_dir> <output_dir>",
+                file=sys.stderr,
+            )
             _usage()
             return 2
-        artifacts_dir = args[1]
-        output_dir = args[2]
-        generate_aggregate(artifacts_dir, output_dir)
+        generate_aggregate(artifacts_dir=args[1], output_dir=args[2])
         return 0
 
     # Default: generate text report
@@ -584,7 +589,6 @@ def main(argv: list[str] | None = None) -> int:
     summary_json_path = args[0]
     output_dir = args[1]
 
-    # Validate and load summary JSON
     summary_path = Path(summary_json_path)
     if not summary_path.exists():
         print(f"ERROR: summary JSON not found: {summary_json_path}", file=sys.stderr)
@@ -600,7 +604,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: invalid JSON in {summary_json_path}: {exc}", file=sys.stderr)
         return 1
 
-    # Determine output file path
+    if not isinstance(summary, dict):
+        print(
+            f"ERROR: expected a JSON object in {summary_json_path}, got {type(summary).__name__}",
+            file=sys.stderr,
+        )
+        return 1
+
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 

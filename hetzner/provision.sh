@@ -64,7 +64,7 @@ wait_for_ssh() {
     local elapsed=0
     local interval=5
 
-    printf '[INFO] Waiting for SSH on %s (timeout %ds)...\n' "${ip}" "${timeout}"
+    printf '[INFO] Waiting for SSH on %s (timeout %ds)...\n' "${ip}" "${timeout}" >&2
 
     while (( elapsed < timeout )); do
         if ssh \
@@ -74,7 +74,7 @@ wait_for_ssh() {
             -i "${HETZNER_SSH_KEY_PATH}" \
             "root@${ip}" \
             'true' &>/dev/null; then
-            printf '[INFO] SSH is available on %s after %ds\n' "${ip}" "${elapsed}"
+            printf '[INFO] SSH is available on %s after %ds\n' "${ip}" "${elapsed}" >&2
             return 0
         fi
 
@@ -98,7 +98,7 @@ create_server() {
     local used_hcloud=false
 
     printf '[INFO] Creating server: %s (image=%s type=%s location=%s)\n' \
-        "${server_name}" "${image}" "${HETZNER_SERVER_TYPE}" "${HETZNER_LOCATION}"
+        "${server_name}" "${image}" "${HETZNER_SERVER_TYPE}" "${HETZNER_LOCATION}" >&2
 
     # ── Primary: hcloud CLI ───────────────────────────────────────────────────
     if command -v hcloud &>/dev/null; then
@@ -115,7 +115,7 @@ create_server() {
             server_id="$(printf '%s' "${hcloud_output}" | jq -r '.server.id')"
             server_ip="$(printf '%s' "${hcloud_output}" | jq -r '.server.public_net.ipv4.ip')"
             used_hcloud=true
-            printf '[INFO] hcloud created server id=%s ip=%s\n' "${server_id}" "${server_ip}"
+            printf '[INFO] hcloud created server id=%s ip=%s\n' "${server_id}" "${server_ip}" >&2
         else
             printf '[WARN] hcloud server create failed — falling back to REST API\n' >&2
         fi
@@ -135,18 +135,17 @@ create_server() {
         )"
 
         server_id="$(printf '%s' "${api_response}" | cut -d'|' -f1)"
-        # IP may already be available from the create response; re-fetch to confirm
-        # Wait until server reaches "running" state first
+        # Wait until server reaches "running" state, then fetch confirmed IP
         hetzner_api_wait_running "${server_id}"
 
         server_ip="$(hetzner_api_get_ip "${server_id}")"
-        printf '[INFO] API created server id=%s ip=%s\n' "${server_id}" "${server_ip}"
+        printf '[INFO] API created server id=%s ip=%s\n' "${server_id}" "${server_ip}" >&2
     fi
 
     # ── Wait for SSH ──────────────────────────────────────────────────────────
     wait_for_ssh "${server_ip}" 120
 
-    # Final output line consumed by caller
+    # Final output line consumed by caller — stdout only, no INFO noise
     printf '%s|%s|%s|%s\n' "${server_id}" "${server_name}" "${server_ip}" "${image}"
 }
 
@@ -185,17 +184,12 @@ main() {
 
         printf '[INFO] Provisioning image: %s\n' "${image}"
 
+        # create_server writes progress to stderr; stdout carries only "id|name|ip|image"
         local result_line
         result_line="$(create_server "${image}")"
 
-        # Parse "id|name|ip|image" from the last line of create_server output
-        # create_server may emit INFO lines; we capture stdout entirely and
-        # extract the final pipe-delimited line.
-        local last_line
-        last_line="$(printf '%s' "${result_line}" | tail -n1)"
-
         local srv_id srv_name srv_ip srv_image
-        IFS='|' read -r srv_id srv_name srv_ip srv_image <<< "${last_line}"
+        IFS='|' read -r srv_id srv_name srv_ip srv_image <<< "${result_line}"
 
         printf '[INFO] Provisioned: id=%s name=%s ip=%s image=%s\n' \
             "${srv_id}" "${srv_name}" "${srv_ip}" "${srv_image}"
