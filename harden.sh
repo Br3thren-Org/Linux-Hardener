@@ -227,7 +227,7 @@ main() {
     # Source all hardening module files
     local module
     for module in "${MODULES[@]}"; do
-        local module_file="${SCRIPT_DIR}/modules/${module}.sh"
+        local module_file="${SCRIPT_DIR}/lib/${module}.sh"
         if [[ -f "${module_file}" ]]; then
             # shellcheck source=/dev/null
             source "${module_file}"
