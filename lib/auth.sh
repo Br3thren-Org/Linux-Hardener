@@ -402,13 +402,10 @@ _auth_set_login_defs_value() {
 
     log_info "auth_apply: setting ${key}=${value} in ${AUTH_LOGIN_DEFS} (was '${current:-unset}')"
 
-    if grep -qE "^[[:space:]#]*${key}[[:space:]]" "${AUTH_LOGIN_DEFS}" 2>/dev/null; then
-        # Replace existing (or commented-out) line
-        sed -i "s|^[[:space:]#]*${key}[[:space:]].*|${key}\t${value}|" "${AUTH_LOGIN_DEFS}"
-    else
-        # Append new entry
-        printf '\n%s\t%s\n' "${key}" "${value}" >> "${AUTH_LOGIN_DEFS}"
-    fi
+    # Remove ALL existing lines (commented or not) that set this key
+    sed -i "/^[[:space:]#]*${key}[[:space:]]/d" "${AUTH_LOGIN_DEFS}"
+    # Append the single canonical value
+    printf '%s\t%s\n' "${key}" "${value}" >> "${AUTH_LOGIN_DEFS}"
 }
 
 _auth_apply_login_defs() {
