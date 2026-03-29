@@ -68,7 +68,7 @@ wait_for_ssh() {
 
     while (( elapsed < timeout )); do
         if ssh \
-            -o StrictHostKeyChecking=no \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=5 \
             -o BatchMode=yes \
             -i "${HETZNER_SSH_KEY_PATH}" \

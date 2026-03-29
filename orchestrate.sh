@@ -181,7 +181,7 @@ remote_exec() {
     shift
     ssh \
         -i "${SSH_KEY_PATH}" \
-        -o StrictHostKeyChecking=no \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 \
         -o BatchMode=yes \
         "root@${ip}" \
@@ -195,7 +195,7 @@ remote_copy_to() {
     local dest="${3}"
     scp \
         -i "${SSH_KEY_PATH}" \
-        -o StrictHostKeyChecking=no \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 \
         -o BatchMode=yes \
         -r \
@@ -210,7 +210,7 @@ remote_copy_from() {
     local dest="${3}"
     scp \
         -i "${SSH_KEY_PATH}" \
-        -o StrictHostKeyChecking=no \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 \
         -o BatchMode=yes \
         -r \
