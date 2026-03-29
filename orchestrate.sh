@@ -596,7 +596,7 @@ main() {
     fi
 
     local server_count
-    server_count="$(jq '.servers | length' "${manifest}")"
+    server_count="$(jq '. | length' "${manifest}")"
 
     if [[ "${server_count}" -eq 0 ]]; then
         printf 'ERROR: No servers found in manifest: %s\n' "${manifest}" >&2
@@ -631,7 +631,7 @@ main() {
                 server_results+=("PASS:${server_image}")
             fi
         fi
-    done < <(jq -c '.servers[]' "${manifest}")
+    done < <(jq -c '.[]' "${manifest}")
 
     # Wait for parallel jobs and collect results
     if [[ "${PARALLEL_TESTS}" == "true" ]]; then
@@ -683,7 +683,7 @@ main() {
             sip="$(printf '%s' "${server_json}" | jq -r '.ip')"
             sname="$(printf '%s' "${server_json}" | jq -r '.name')"
             printf '  ssh -i %s root@%s  # %s\n' "${SSH_KEY_PATH}" "${sip}" "${sname}"
-        done < <(jq -c '.servers[]' "${manifest}")
+        done < <(jq -c '.[]' "${manifest}")
         printf '\nTo tear down manually:\n'
         printf '  bash %s/hetzner/teardown.sh %s\n' "${SCRIPT_DIR}" "${manifest}"
     fi
