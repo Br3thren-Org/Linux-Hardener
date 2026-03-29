@@ -271,8 +271,7 @@ _logging_build_audit_rules() {
 -a always,exit -F arch=b64 -S clock_settime -k time_change
 -w /etc/localtime           -p wa -k time_change
 
-# Make the audit rules immutable (requires reboot to change)
--e 2
+# Note: -e 2 (immutable) removed — it prevents audit-rules.service from reloading on modern auditd
 RULES
 )"
 
@@ -346,8 +345,7 @@ RULES
 -w /etc/cron.hourly/        -p wa -k cron
 -w /var/spool/cron/         -p wa -k cron
 
-# Make the audit rules immutable (requires reboot to change)
--e 2
+# Note: -e 2 (immutable) removed — it prevents audit-rules.service from reloading on modern auditd
 RULES
 }
 

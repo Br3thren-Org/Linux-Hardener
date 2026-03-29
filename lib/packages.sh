@@ -119,7 +119,7 @@ packages_apply() {
     # --- install security-enhancing packages ---
     case "${DISTRO_FAMILY}" in
         debian)
-            local security_pkgs=(libpam-tmpdir needrestart debsums apt-show-versions acct sysstat apt-listbugs apt-listchanges)
+            local security_pkgs=(libpam-tmpdir needrestart debsums apt-show-versions acct sysstat apt-listbugs apt-listchanges rkhunter)
             for pkg in "${security_pkgs[@]}"; do
                 if ! pkg_is_installed "${pkg}"; then
                     if should_write; then
@@ -133,6 +133,12 @@ packages_apply() {
                     log_debug "packages_apply: ${pkg} already installed (OK)"
                 fi
             done
+
+            # Initialize rkhunter database if just installed
+            if should_write && pkg_is_installed rkhunter; then
+                rkhunter --propupd 2>/dev/null || true
+                log_info "rkhunter database initialized"
+            fi
             ;;
         rhel)
             local rhel_security_pkgs=(psacct sysstat curl)
@@ -163,6 +169,16 @@ packages_apply() {
         systemctl enable sysstat 2>/dev/null || true
         systemctl start sysstat 2>/dev/null || true
         log_info "Enabled sysstat data collection"
+    fi
+
+    # Enable debsums periodic verification
+    if should_write && pkg_is_installed debsums; then
+        if [[ -f /etc/default/debsums ]]; then
+            sed -i 's/^CRON_CHECK=.*/CRON_CHECK=weekly/' /etc/default/debsums
+        else
+            echo 'CRON_CHECK=weekly' > /etc/default/debsums
+        fi
+        log_info "Enabled debsums weekly cron check"
     fi
 
     # --- restrict compiler access (HRDN-7222) ---

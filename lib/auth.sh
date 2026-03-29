@@ -9,6 +9,7 @@ readonly AUTH_TIMEOUT_FILE="/etc/profile.d/99-hardener-timeout.sh"
 readonly AUTH_USB_CONF="/etc/modprobe.d/99-hardener-usb.conf"
 readonly AUTH_FIREWIRE_CONF="/etc/modprobe.d/99-hardener-firewire.conf"
 readonly AUTH_PROTOCOLS_CONF="/etc/modprobe.d/99-hardener-protocols.conf"
+readonly AUTH_IPTABLES_CONF="/etc/modprobe.d/99-hardener-iptables.conf"
 readonly AUTH_PWQUALITY_CONF="/etc/security/pwquality.conf"
 readonly AUTH_LOGIN_DEFS="/etc/login.defs"
 
@@ -120,6 +121,7 @@ auth_apply() {
     _auth_apply_usb_blacklist
     _auth_apply_firewire_blacklist
     _auth_apply_protocol_blacklist
+    _auth_apply_iptables_blacklist
     _auth_apply_password_policy
     _auth_apply_login_defs
 }
@@ -315,6 +317,36 @@ EOF
         "rm -f ${AUTH_PROTOCOLS_CONF}"
 }
 
+_auth_apply_iptables_blacklist() {
+    # Only apply on Debian — RHEL uses firewalld which relies on iptables kernel modules
+    if [[ "${DISTRO_FAMILY:-}" != "debian" ]]; then
+        log_debug "auth_apply: iptables blacklist skipped (not debian)"
+        return 0
+    fi
+
+    local content
+    content="$(cat <<'EOF'
+# Hardener: prevent iptables modules from loading (using nftables instead)
+install ip_tables /bin/true
+install ip6_tables /bin/true
+EOF
+)"
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would blacklist iptables modules in ${AUTH_IPTABLES_CONF}"
+        return 0
+    fi
+
+    write_file_if_changed "${AUTH_IPTABLES_CONF}" "${content}" "Blacklist iptables kernel modules (prefer nftables)"
+
+    log_change \
+        "ip_tables and ip6_tables blacklisted via ${AUTH_IPTABLES_CONF}" \
+        "Prevent FIRE-4512 warning: iptables modules loaded without rules (using nftables instead)" \
+        "low" \
+        "cat ${AUTH_IPTABLES_CONF}" \
+        "rm -f ${AUTH_IPTABLES_CONF}"
+}
+
 _auth_apply_password_policy() {
     if [[ "${ENABLE_PASSWORD_POLICY:-false}" != "true" ]]; then
         log_info "auth_apply: password policy skipped (ENABLE_PASSWORD_POLICY != true)"
@@ -366,7 +398,8 @@ _auth_audit_login_defs() {
     fi
 
     local -A expected_vals=(
-        [SHA_CRYPT_ROUNDS]=5000
+        [SHA_CRYPT_MIN_ROUNDS]=5000
+        [SHA_CRYPT_MAX_ROUNDS]=5000
         [PASS_MIN_DAYS]=1
         [PASS_MAX_DAYS]=365
         [PASS_WARN_AGE]=14
@@ -415,23 +448,24 @@ _auth_apply_login_defs() {
     fi
 
     if ! should_write; then
-        log_info "[DRY-RUN] Would harden ${AUTH_LOGIN_DEFS} (SHA_CRYPT_ROUNDS, PASS_MIN/MAX_DAYS, PASS_WARN_AGE, UMASK)"
+        log_info "[DRY-RUN] Would harden ${AUTH_LOGIN_DEFS} (SHA_CRYPT_MIN/MAX_ROUNDS, PASS_MIN/MAX_DAYS, PASS_WARN_AGE, UMASK)"
         return 0
     fi
 
     backup_file "${AUTH_LOGIN_DEFS}"
 
-    _auth_set_login_defs_value "SHA_CRYPT_ROUNDS" "5000"
-    _auth_set_login_defs_value "PASS_MIN_DAYS"    "1"
-    _auth_set_login_defs_value "PASS_MAX_DAYS"    "365"
-    _auth_set_login_defs_value "PASS_WARN_AGE"    "14"
-    _auth_set_login_defs_value "UMASK"            "027"
+    _auth_set_login_defs_value "SHA_CRYPT_MIN_ROUNDS" "5000"
+    _auth_set_login_defs_value "SHA_CRYPT_MAX_ROUNDS" "5000"
+    _auth_set_login_defs_value "PASS_MIN_DAYS"        "1"
+    _auth_set_login_defs_value "PASS_MAX_DAYS"        "365"
+    _auth_set_login_defs_value "PASS_WARN_AGE"        "14"
+    _auth_set_login_defs_value "UMASK"                "027"
 
     log_change \
-        "Hardened ${AUTH_LOGIN_DEFS}: SHA_CRYPT_ROUNDS, PASS_MIN/MAX_DAYS, PASS_WARN_AGE, UMASK" \
+        "Hardened ${AUTH_LOGIN_DEFS}: SHA_CRYPT_MIN_ROUNDS, SHA_CRYPT_MAX_ROUNDS, PASS_MIN/MAX_DAYS, PASS_WARN_AGE, UMASK" \
         "Apply password ageing policy and secure default umask (Lynis AUTH-9230/9286/9328)" \
         "medium" \
-        "grep -E 'SHA_CRYPT_ROUNDS|PASS_MIN_DAYS|PASS_MAX_DAYS|PASS_WARN_AGE|^UMASK' ${AUTH_LOGIN_DEFS}" \
+        "grep -E 'SHA_CRYPT_MIN_ROUNDS|SHA_CRYPT_MAX_ROUNDS|PASS_MIN_DAYS|PASS_MAX_DAYS|PASS_WARN_AGE|^UMASK' ${AUTH_LOGIN_DEFS}" \
         "restore_file ${AUTH_LOGIN_DEFS}"
 }
 
@@ -473,6 +507,11 @@ auth_rollback() {
     if [[ -f "${AUTH_PROTOCOLS_CONF}" ]]; then
         rm -f "${AUTH_PROTOCOLS_CONF}"
         log_info "auth_rollback: removed ${AUTH_PROTOCOLS_CONF}"
+    fi
+
+    if [[ -f "${AUTH_IPTABLES_CONF}" ]]; then
+        rm -f "${AUTH_IPTABLES_CONF}"
+        log_info "auth_rollback: removed ${AUTH_IPTABLES_CONF}"
     fi
 
     log_success "auth: rollback complete"

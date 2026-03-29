@@ -34,6 +34,13 @@ readonly -a SYSCTL_SETTINGS=(
     "kernel.sysrq=0"
     "fs.suid_dumpable=0"
     "net.ipv4.tcp_timestamps=0"
+    # Additional KRNL-6000 hardening
+    "dev.tty.ldisc_autoload=0"
+    "kernel.perf_event_paranoid=3"
+    "kernel.unprivileged_bpf_disabled=1"
+    "net.core.bpf_jit_harden=2"
+    "net.ipv6.conf.default.accept_ra=0"
+    "net.ipv6.conf.all.accept_ra=0"
 )
 
 # ─── Conditional Settings ─────────────────────────────────────────────────────
