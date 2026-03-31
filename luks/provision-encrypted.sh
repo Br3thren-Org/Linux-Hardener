@@ -244,6 +244,9 @@ main() {
     mv "${ARTIFACTS_DIR}" "${final_artifacts}"
     ARTIFACTS_DIR="${final_artifacts}"
 
+    # Update key paths after directory rename
+    DROPBEAR_KEY="${ARTIFACTS_DIR}/ssh-key"
+
     # ── Step 2: Wait for SSH ─────────────────────────────────────────────────
 
     printf '[2/10] Waiting for SSH...\n'
@@ -309,12 +312,23 @@ main() {
       "${LUKS_CIPHER:-aes-xts-plain64}" "${LUKS_KEY_SIZE:-512}" \
       "${IMAGE}" "${DROPBEAR_PUBKEY}" "${DROPBEAR_PORT}" \
       "${PROVISION_USER}" "${PASSPHRASE}" "${DRY_RUN}")" \
-        2>&1 | tee "${ARTIFACTS_DIR}/provision.log" || {
+        2>&1 | tee "${ARTIFACTS_DIR}/provision.log"
+    local engine_rc=${PIPESTATUS[0]}
+
+    # Engine SSH may return non-zero if connection drops during finalize (unmount/close)
+    # Check the status file on the server to determine if engine actually succeeded
+    if [[ "${engine_rc}" -ne 0 ]]; then
+        printf '  Engine SSH exited with code %d — checking status on server...\n' "${engine_rc}"
+        local status_check
+        status_check="$(_rescue_ssh 'cat /tmp/luks-engine-status 2>/dev/null | tail -1' 2>/dev/null || true)"
+        if [[ "${status_check}" == *"Finalize"* ]]; then
+            printf '  Engine completed successfully (finalize step reached).\n'
+        else
             printf '\nERROR: Engine failed. Server left in rescue mode.\n' >&2
             printf '  SSH: ssh -i %s root@%s\n' "${SSH_KEY_PATH}" "${SERVER_IP}" >&2
-            printf '  Delete: provision-encrypted.sh cleanup (or delete via provider UI)\n' >&2
             exit 1
-        }
+        fi
+    fi
 
     printf '\n'
 

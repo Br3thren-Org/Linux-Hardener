@@ -176,16 +176,45 @@ fi
 # Step 3: Send passphrase to cryptroot-unlock
 printf '[3/4] Sending passphrase to unlock LUKS volume...\n'
 
-# Try cryptroot-unlock first (Debian), fall back to manual echo to console
+# Unlock LUKS: upload passphrase via SSH cat, then run cryptsetup + kill askpass
+# Dropbear initramfs doesn't have scp, so we use SSH stdin redirection
 unlock_result=0
-printf '%s\n' "${PASSPHRASE}" | ssh \
+
+# Step A: upload passphrase to a temp file on the initramfs
+printf '%s' "${PASSPHRASE}" | ssh \
     -i "${SSH_KEY}" -p "${DROPBEAR_PORT}" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=10 \
-    "root@${HOST}" 'cryptroot-unlock' 2>/dev/null || unlock_result=$?
+    "root@${HOST}" 'cat > /tmp/.lp && chmod 600 /tmp/.lp' 2>/dev/null || {
+        printf '  WARN: passphrase upload may have failed.\n'
+    }
 
-# cryptroot-unlock may exit non-zero as the connection drops during pivot
-# This is expected behavior
+# Step B: write passphrase to the cryptsetup passfifo (the proper Debian unlock method)
+# This is the FIFO that the cryptroot init script reads from — writing to it
+# triggers the actual unlock and boot continuation in one step.
+ssh \
+    -i "${SSH_KEY}" -p "${DROPBEAR_PORT}" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=10 \
+    "root@${HOST}" '
+        # Method 1: Write to passfifo (Debian standard method)
+        if [ -p /lib/cryptsetup/passfifo ]; then
+            echo "Writing passphrase to passfifo..."
+            cat /tmp/.lp > /lib/cryptsetup/passfifo
+            rm -f /tmp/.lp
+            echo "Boot should continue now"
+        else
+            # Method 2: Direct cryptsetup + kill askpass (fallback)
+            LUKS_DEV=$(blkid -t TYPE=crypto_LUKS -o device 2>/dev/null | head -1)
+            echo "Unlocking $LUKS_DEV directly..."
+            cat /tmp/.lp | cryptsetup luksOpen "$LUKS_DEV" crypt-root -
+            rm -f /tmp/.lp
+            kill $(pidof askpass) 2>/dev/null || true
+            echo "LUKS unlocked"
+        fi
+    ' 2>/dev/null || unlock_result=$?
+
+# Connection drops as initramfs pivots to real root — expected
 if [[ "${unlock_result}" -ne 0 ]]; then
     printf '  Connection dropped (expected — initramfs is transitioning).\n'
 fi

@@ -93,9 +93,22 @@ provider_create_server() {
 provider_enter_rescue() {
     local server_id="${1}"
 
-    # Enable rescue mode (linux64)
+    # Enable rescue mode (linux64) with SSH keys for key-based auth
+    local ssh_keys_json="[]"
+    if [[ -n "${SSH_KEY_NAME:-}" ]]; then
+        # Resolve SSH key ID from name
+        local keys_response
+        keys_response="$(curl -sS -H "$(_hetzner_auth_header)" "${_HETZNER_API_BASE}/ssh_keys" 2>/dev/null)"
+        local key_id
+        key_id="$(printf '%s' "${keys_response}" | jq -r --arg name "${SSH_KEY_NAME}" \
+            '.ssh_keys[] | select(.name == $name) | .id' 2>/dev/null)"
+        if [[ -n "${key_id}" && "${key_id}" != "null" ]]; then
+            ssh_keys_json="[${key_id}]"
+        fi
+    fi
+
     local payload
-    payload="$(printf '{"type": "linux64"}' )"
+    payload="$(printf '{"type": "linux64", "ssh_keys": %s}' "${ssh_keys_json}")"
 
     local response
     response="$(_hetzner_api POST "/servers/${server_id}/actions/enable_rescue" "${payload}")" \

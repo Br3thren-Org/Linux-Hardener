@@ -79,7 +79,8 @@ _engine_parse_distro() {
             _ENGINE_DISTRO_FAMILY="debian"
             case "${version}" in
                 12) _ENGINE_DISTRO_CODENAME="bookworm" ;;
-                *)  _ENGINE_DISTRO_CODENAME="bookworm" ;;
+                13) _ENGINE_DISTRO_CODENAME="trixie" ;;
+                *)  _ENGINE_DISTRO_CODENAME="trixie" ;;
             esac
             ;;
         ubuntu)
@@ -228,14 +229,32 @@ engine_preflight() {
             _engine_fail "Could not install missing tools: ${missing_tools[*]}"
     fi
 
+    # Stop any existing RAID arrays and close LUKS volumes
+    _engine_info "Cleaning up existing RAID/LUKS/mounts..."
+    # Close any open LUKS volumes
+    local dm
+    for dm in /dev/mapper/crypt-*; do
+        [[ -b "${dm}" ]] && cryptsetup luksClose "$(basename "${dm}")" 2>/dev/null || true
+    done
+    # Stop all mdadm arrays
+    mdadm --stop --scan 2>/dev/null || true
+    # Deactivate LVM volume groups
+    vgchange -an 2>/dev/null || true
+    sleep 2
+
     # Check disks are not mounted
     local disk
     for disk in "${_ENGINE_DETECTED_DISKS[@]}"; do
-        if grep -q "^${disk}" /proc/mounts 2>/dev/null; then
-            _engine_warn "Disk ${disk} has mounted partitions — unmounting"
-            umount -l "${disk}"* 2>/dev/null || true
-        fi
+        # Unmount all partitions on this disk
+        local part
+        for part in "${disk}"*; do
+            if grep -q "^${part}" /proc/mounts 2>/dev/null; then
+                _engine_warn "Partition ${part} is mounted — unmounting"
+                umount -l "${part}" 2>/dev/null || true
+            fi
+        done
     done
+    sleep 1
 
     # Check minimum disk size (8GB)
     for disk in "${_ENGINE_DETECTED_DISKS[@]}"; do
@@ -277,19 +296,24 @@ engine_partition() {
         # Create GPT partition table
         local part_num=1
 
-        # Partition 1: /boot
+        # Partition 1: BIOS Boot Partition (1MB, required for GRUB on GPT with BIOS)
+        sgdisk -n "${part_num}:0:+1M" -t "${part_num}:ef02" \
+            -c "${part_num}:bios-boot" "${disk}"
+        (( part_num++ )) || true
+
+        # Partition 2: /boot
         sgdisk -n "${part_num}:0:+${ENGINE_BOOT_SIZE}M" -t "${part_num}:8300" \
             -c "${part_num}:boot" "${disk}"
         (( part_num++ )) || true
 
-        # Partition 2: /boot/efi (if EFI size > 0)
+        # Partition 3: /boot/efi (if EFI size > 0)
         if [[ "${ENGINE_EFI_SIZE}" -gt 0 ]]; then
             sgdisk -n "${part_num}:0:+${ENGINE_EFI_SIZE}M" -t "${part_num}:ef00" \
                 -c "${part_num}:efi" "${disk}"
             (( part_num++ )) || true
         fi
 
-        # Partition 3: LUKS (remaining space)
+        # Partition 4 (or 3): LUKS (remaining space)
         sgdisk -n "${part_num}:0:0" -t "${part_num}:8309" \
             -c "${part_num}:luks" "${disk}"
 
@@ -299,19 +323,21 @@ engine_partition() {
     done
 
     # Determine partition device names (handles nvme naming: nvme0n1p1 vs sda1)
+    # Layout: p1=bios-boot, p2=/boot, p3=/boot/efi (optional), p4=LUKS
     local first_disk="${_ENGINE_DETECTED_DISKS[0]}"
     local part_suffix=""
     if [[ "${first_disk}" == *"nvme"* ]] || [[ "${first_disk}" == *"loop"* ]]; then
         part_suffix="p"
     fi
 
-    _ENGINE_BOOT_DEVICE="${first_disk}${part_suffix}1"
+    # p1 is BIOS boot (no device needed — GRUB uses it directly)
+    _ENGINE_BOOT_DEVICE="${first_disk}${part_suffix}2"
     if [[ "${ENGINE_EFI_SIZE}" -gt 0 ]]; then
-        _ENGINE_EFI_DEVICE="${first_disk}${part_suffix}2"
-        _ENGINE_LUKS_DEVICE="${first_disk}${part_suffix}3"
+        _ENGINE_EFI_DEVICE="${first_disk}${part_suffix}3"
+        _ENGINE_LUKS_DEVICE="${first_disk}${part_suffix}4"
     else
         _ENGINE_EFI_DEVICE=""
-        _ENGINE_LUKS_DEVICE="${first_disk}${part_suffix}2"
+        _ENGINE_LUKS_DEVICE="${first_disk}${part_suffix}3"
     fi
 
     _engine_ok "Partitioning complete"
@@ -336,6 +362,7 @@ engine_assemble_raid() {
     local efi_parts=()
     local data_parts=()
 
+    # Layout: p1=bios-boot (skip), p2=/boot, p3=/boot/efi (optional), p4=LUKS
     local disk part_suffix
     for disk in "${_ENGINE_DETECTED_DISKS[@]}"; do
         part_suffix=""
@@ -343,12 +370,12 @@ engine_assemble_raid() {
             part_suffix="p"
         fi
 
-        boot_parts+=("${disk}${part_suffix}1")
+        boot_parts+=("${disk}${part_suffix}2")
         if [[ "${ENGINE_EFI_SIZE}" -gt 0 ]]; then
-            efi_parts+=("${disk}${part_suffix}2")
-            data_parts+=("${disk}${part_suffix}3")
+            efi_parts+=("${disk}${part_suffix}3")
+            data_parts+=("${disk}${part_suffix}4")
         else
-            data_parts+=("${disk}${part_suffix}2")
+            data_parts+=("${disk}${part_suffix}3")
         fi
     done
 
@@ -516,13 +543,22 @@ _engine_install_debian() {
     # Mount virtual filesystems for chroot
     _engine_mount_vfs
 
+    # Detect UEFI vs BIOS for GRUB package selection
+    local grub_pkg="grub-pc"
+    if [[ -d /sys/firmware/efi ]]; then
+        grub_pkg="grub-efi-amd64"
+        _engine_info "UEFI boot detected — using ${grub_pkg}"
+    else
+        _engine_info "BIOS boot detected — using ${grub_pkg}"
+    fi
+
     # Install essential packages inside chroot
     chroot "${_ENGINE_MOUNT}" bash -c "
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y
         apt-get install -y \
             linux-image-amd64 \
-            grub-pc \
+            ${grub_pkg} \
             cryptsetup \
             cryptsetup-initramfs \
             dropbear-initramfs \
@@ -715,6 +751,38 @@ _engine_configure_networking() {
                 mkdir -p "$(dirname "${initramfs_conf}")"
                 printf 'IP=dhcp\n' > "${initramfs_conf}"
             fi
+
+            # Configure real OS networking — detect primary interface and use DHCP
+            local primary_iface
+            primary_iface="$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)"
+            primary_iface="${primary_iface:-eth0}"
+            _engine_info "Configuring networking for interface ${primary_iface}"
+
+            mkdir -p "${_ENGINE_MOUNT}/etc/network"
+            cat > "${_ENGINE_MOUNT}/etc/network/interfaces" <<NETEOF
+# Loopback
+auto lo
+iface lo inet loopback
+
+# Primary network interface (DHCP)
+auto ${primary_iface}
+iface ${primary_iface} inet dhcp
+NETEOF
+
+            # Also configure systemd-networkd as fallback
+            mkdir -p "${_ENGINE_MOUNT}/etc/systemd/network"
+            cat > "${_ENGINE_MOUNT}/etc/systemd/network/20-dhcp.network" <<NETEOF
+[Match]
+Name=e* en*
+
+[Network]
+DHCP=yes
+NETEOF
+            chroot "${_ENGINE_MOUNT}" systemctl enable systemd-networkd 2>/dev/null || true
+
+            # Enable networking service
+            chroot "${_ENGINE_MOUNT}" systemctl enable networking 2>/dev/null || true
+
             # Rebuild initramfs with network config
             chroot "${_ENGINE_MOUNT}" update-initramfs -u || true
             ;;
@@ -723,6 +791,8 @@ _engine_configure_networking() {
             local dracut_net="${_ENGINE_MOUNT}/etc/dracut.conf.d/network.conf"
             printf 'add_dracutmodules+=" network "\nkernel_cmdline="ip=dhcp rd.neednet=1"\n' \
                 > "${dracut_net}"
+            # NetworkManager should handle real OS networking via DHCP
+            chroot "${_ENGINE_MOUNT}" systemctl enable NetworkManager 2>/dev/null || true
             chroot "${_ENGINE_MOUNT}" dracut --force || true
             ;;
     esac
@@ -746,12 +816,27 @@ EOF
 
     case "${_ENGINE_DISTRO_FAMILY}" in
         debian)
-            # Install GRUB to all disks
-            local disk
-            for disk in "${_ENGINE_DETECTED_DISKS[@]}"; do
-                chroot "${_ENGINE_MOUNT}" grub-install "${disk}" \
-                    || _engine_fail "grub-install failed on ${disk}"
-            done
+            if [[ -d /sys/firmware/efi ]]; then
+                # UEFI: mount efivarfs into chroot and install
+                mount -t efivarfs efivarfs "${_ENGINE_MOUNT}/sys/firmware/efi/efivars" 2>/dev/null || true
+
+                # Use --removable to install to fallback EFI path (EFI/BOOT/BOOTX64.EFI)
+                # This avoids NVRAM registration issues in rescue/chroot environments
+                chroot "${_ENGINE_MOUNT}" grub-install \
+                    --target=x86_64-efi \
+                    --efi-directory=/boot/efi \
+                    --bootloader-id=debian \
+                    --removable \
+                    --recheck \
+                    || _engine_fail "grub-install (UEFI) failed"
+            else
+                # BIOS: install to all disks (BIOS boot partition handles embedding)
+                local disk
+                for disk in "${_ENGINE_DETECTED_DISKS[@]}"; do
+                    chroot "${_ENGINE_MOUNT}" grub-install "${disk}" \
+                        || _engine_fail "grub-install failed on ${disk}"
+                done
+            fi
             chroot "${_ENGINE_MOUNT}" update-grub \
                 || _engine_fail "update-grub failed"
             ;;
@@ -770,13 +855,25 @@ EOF
 }
 
 _engine_configure_user() {
+    # Set up root SSH access — install both Dropbear key and user's main SSH key
+    mkdir -p "${_ENGINE_MOUNT}/root/.ssh"
+    chmod 700 "${_ENGINE_MOUNT}/root/.ssh"
+    printf '%s\n' "${ENGINE_SSH_PUBKEY}" > "${_ENGINE_MOUNT}/root/.ssh/authorized_keys"
+    # Also add the user's main SSH key (from the rescue environment) if different
+    if [[ -f /root/.ssh/authorized_keys ]]; then
+        local main_key
+        while IFS= read -r main_key; do
+            [[ -z "${main_key}" || "${main_key}" == "#"* ]] && continue
+            if ! grep -qF "${main_key}" "${_ENGINE_MOUNT}/root/.ssh/authorized_keys" 2>/dev/null; then
+                printf '%s\n' "${main_key}" >> "${_ENGINE_MOUNT}/root/.ssh/authorized_keys"
+                _engine_info "Added rescue-environment SSH key to root authorized_keys"
+            fi
+        done < /root/.ssh/authorized_keys
+    fi
+    chmod 600 "${_ENGINE_MOUNT}/root/.ssh/authorized_keys"
+    _engine_info "Root SSH keys configured"
+
     if [[ -z "${ENGINE_PROVISION_USER}" ]]; then
-        # At minimum, set up root SSH access
-        mkdir -p "${_ENGINE_MOUNT}/root/.ssh"
-        chmod 700 "${_ENGINE_MOUNT}/root/.ssh"
-        printf '%s\n' "${ENGINE_SSH_PUBKEY}" > "${_ENGINE_MOUNT}/root/.ssh/authorized_keys"
-        chmod 600 "${_ENGINE_MOUNT}/root/.ssh/authorized_keys"
-        _engine_info "Root SSH key configured"
         return 0
     fi
 
