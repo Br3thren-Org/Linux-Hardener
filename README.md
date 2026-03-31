@@ -73,6 +73,54 @@ OPTIONS:
 - Switches all subsequent operations to run as that user
 - Prints the SSH connection command at the end
 
+## LUKS Encrypted Provisioning
+
+Provision cloud servers with full-disk LUKS encryption. Only SSH key holders
+can unlock the server after reboot via Dropbear in the initramfs.
+
+### Quick Start
+
+```bash
+# Provision an encrypted Debian 12 server on Hetzner
+export HETZNER_API_TOKEN="your-token"
+./luks/provision-encrypted.sh \
+    --provider hetzner \
+    --image debian-12 \
+    --ssh-key ~/.ssh/id_ed25519
+
+# After reboot, unlock with:
+./luks/unlock-remote.sh --host <ip> --key artifacts/luks/.../ssh-key
+```
+
+### Supported Providers
+
+| Provider | Status |
+|----------|--------|
+| Hetzner | Supported |
+| DigitalOcean | Supported |
+| Vultr | Supported |
+| AWS EC2 | Supported (EBS-based) |
+| Linode | Supported |
+| OVH | Supported |
+| Ionos | Supported |
+
+### RAID Support
+
+Multi-disk servers support RAID via mdadm:
+
+```bash
+./luks/provision-encrypted.sh \
+    --provider hetzner \
+    --image debian-12 \
+    --ssh-key ~/.ssh/id_ed25519 \
+    --disks "/dev/sda,/dev/sdb" \
+    --raid raid1
+```
+
+Supported levels: `raid0`, `raid1`, `raid5`, `raid6`, `raid10`.
+
+See `docs/superpowers/specs/2026-03-31-luks-encrypted-provisioning-design.md` for full documentation.
+
 ## Quick Start — Standalone (On Target)
 
 ```bash
