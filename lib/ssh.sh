@@ -47,6 +47,43 @@ _ssh_check_setting() {
     return 1
 }
 
+# _ssh_ensure_access_group — create the SSH access group and add all
+# non-system users with a valid login shell + root to it.
+_ssh_ensure_access_group() {
+    local group="${1}"
+
+    if ! getent group "${group}" &>/dev/null; then
+        groupadd "${group}"
+        log_info "ssh_apply: created group '${group}'"
+    fi
+
+    # Add root so PermitRootLogin still works
+    if ! id -nG root 2>/dev/null | grep -qw "${group}"; then
+        usermod -aG "${group}" root
+        log_info "ssh_apply: added root to group '${group}'"
+    fi
+
+    # Add all human users (UID >= 1000 with a real shell)
+    local username uid shell
+    while IFS=: read -r username _ uid _ _ _ shell; do
+        [[ "${uid}" -lt 1000 ]] && continue
+        case "${shell}" in
+            */nologin|*/false|"") continue ;;
+        esac
+        if ! id -nG "${username}" 2>/dev/null | grep -qw "${group}"; then
+            usermod -aG "${group}" "${username}"
+            log_info "ssh_apply: added user '${username}' to group '${group}'"
+        fi
+    done < /etc/passwd
+
+    log_change \
+        "Ensured SSH access group '${group}' with all human users" \
+        "Restrict SSH login to members of '${group}' only" \
+        "medium" \
+        "getent group ${group}" \
+        "groupdel ${group}"
+}
+
 # ─── Audit ────────────────────────────────────────────────────────────────────
 
 ssh_audit() {
@@ -116,6 +153,12 @@ ssh_apply() {
         log_debug "ssh_apply: ${SSH_MAIN_CONFIG} already has Include directive (OK)"
     fi
 
+    # --- Ensure SSH access group exists and current users are members ---
+    local ssh_group="${SSH_ALLOW_GROUP:-}"
+    if [[ -n "${ssh_group}" ]] && should_write; then
+        _ssh_ensure_access_group "${ssh_group}"
+    fi
+
     # --- Build drop-in config content ---
     local dropin_content
     dropin_content="$(cat <<EOF
@@ -148,6 +191,12 @@ MaxStartups 10:30:60
 AllowStreamLocalForwarding no
 EOF
 )"
+
+    # Append AllowGroups if configured
+    if [[ -n "${ssh_group}" ]]; then
+        dropin_content="${dropin_content}
+AllowGroups ${ssh_group}"
+    fi
 
     if ! should_write; then
         log_info "[DRY-RUN] Would write SSH drop-in config to ${SSH_DROPIN_PATH}"

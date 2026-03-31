@@ -71,6 +71,10 @@ _integrity_apply_fail2ban() {
     if ! command -v fail2ban-server &>/dev/null; then
         log_info "integrity_apply: fail2ban not installed, installing now"
         if should_write; then
+            # RHEL-family needs EPEL for fail2ban; Fedora has it in main repos
+            if [[ "${DISTRO_FAMILY:-}" == "rhel" && "${DISTRO_ID:-}" != "fedora" ]]; then
+                dnf install -y epel-release 2>/dev/null || true
+            fi
             pkg_install fail2ban || {
                 log_error "integrity_apply: failed to install fail2ban"
                 (( CHANGES_FAILED++ )) || true
@@ -178,6 +182,42 @@ _integrity_apply_aide() {
         fi
     else
         log_debug "integrity_apply: AIDE already installed (OK)"
+    fi
+
+    # Configure AIDE to use SHA512 checksums (FINT-4402)
+    if should_write; then
+        local aide_conf_main
+        if [[ -f "/etc/aide/aide.conf" ]]; then
+            aide_conf_main="/etc/aide/aide.conf"
+        elif [[ -f "/etc/aide.conf" ]]; then
+            aide_conf_main="/etc/aide.conf"
+        fi
+
+        if [[ -n "${aide_conf_main:-}" ]]; then
+            # Check if SHA512 is already in the checksum config
+            if ! grep -qE '^\s*(Checksums|CONTENT_EX|DATAONLY).*sha512' "${aide_conf_main}" 2>/dev/null; then
+                # Add SHA512 to default checksum group or create a drop-in
+                local aide_dropin_dir="/etc/aide/aide.conf.d"
+                [[ ! -d "${aide_dropin_dir}" ]] && aide_dropin_dir=""
+
+                if [[ -n "${aide_dropin_dir}" ]]; then
+                    local sha_dropin="${aide_dropin_dir}/99_hardener_sha512"
+                    local sha_content="# Hardener: use SHA512 for checksums (FINT-4402)
+CONTENT_EX = sha512+ftype+p+u+g+n+acl+selinux+xattrs"
+                    write_file_if_changed "${sha_dropin}" "${sha_content}" "Configure AIDE SHA512 checksums"
+                else
+                    # Append to main config
+                    backup_file "${aide_conf_main}"
+                    if ! grep -q 'sha512' "${aide_conf_main}" 2>/dev/null; then
+                        printf '\n# Hardener: use SHA512 for checksums (FINT-4402)\nCONTENT_EX = sha512+ftype+p+u+g+n+acl+selinux+xattrs\n' >> "${aide_conf_main}"
+                        log_info "integrity_apply: added SHA512 to AIDE config"
+                        (( CHANGES_APPLIED++ )) || true
+                    fi
+                fi
+            else
+                log_debug "integrity_apply: AIDE already uses SHA512 checksums (OK)"
+            fi
+        fi
     fi
 
     # Initialise the database if neither aide.db nor aide.db.gz exists

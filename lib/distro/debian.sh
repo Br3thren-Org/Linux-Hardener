@@ -316,6 +316,7 @@ debian_install_lynis() {
                 log_info "[DRY-RUN] Would clone Lynis from GitHub to /opt/lynis"
                 return 0
             fi
+            DEBIAN_FRONTEND=noninteractive apt-get update -y
             pkg_install git
             git clone --depth 1 https://github.com/CISOfy/lynis.git /opt/lynis
             log_success "Lynis cloned to /opt/lynis"

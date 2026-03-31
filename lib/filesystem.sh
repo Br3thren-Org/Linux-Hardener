@@ -6,19 +6,33 @@
 # ─── Sensitive File Definitions ───────────────────────────────────────────────
 # Each entry is "path|expected_mode|expected_owner|expected_group"
 
-readonly -a SENSITIVE_FILES=(
-    "/etc/shadow|0640|root|shadow"
-    "/etc/gshadow|0640|root|shadow"
-    "/etc/passwd|0644|root|root"
-    "/etc/group|0644|root|root"
-    "/etc/crontab|0600|root|root"
-    "/etc/ssh/sshd_config|0600|root|root"
-    "/etc/cron.d|0700|root|root"
-    "/etc/cron.daily|0700|root|root"
-    "/etc/cron.hourly|0700|root|root"
-    "/etc/cron.weekly|0700|root|root"
-    "/etc/cron.monthly|0700|root|root"
-)
+# _fs_build_sensitive_files — populates SENSITIVE_FILES array dynamically.
+# Must be called after distro detection because shadow group varies.
+_fs_build_sensitive_files() {
+    local shadow_grp
+    if getent group shadow &>/dev/null; then
+        shadow_grp="shadow"
+    else
+        shadow_grp="root"
+    fi
+
+    SENSITIVE_FILES=(
+        "/etc/shadow|0640|root|${shadow_grp}"
+        "/etc/gshadow|0640|root|${shadow_grp}"
+        "/etc/passwd|0644|root|root"
+        "/etc/group|0644|root|root"
+        "/etc/crontab|0600|root|root"
+        "/etc/ssh/sshd_config|0600|root|root"
+        "/etc/cron.d|0700|root|root"
+        "/etc/cron.daily|0700|root|root"
+        "/etc/cron.hourly|0700|root|root"
+        "/etc/cron.weekly|0700|root|root"
+        "/etc/cron.monthly|0700|root|root"
+        "/boot/grub/grub.cfg|0600|root|root"
+    )
+}
+
+declare -a SENSITIVE_FILES=()
 
 # Drop-in paths managed by this module
 readonly _FS_LIMITS_CONF="/etc/security/limits.d/99-hardening.conf"
@@ -150,6 +164,8 @@ tmpfs  ${mountpoint}  tmpfs  defaults,${new_opts}  0  0"
 filesystem_audit() {
     log_info "filesystem_audit: checking mount options and file permissions"
 
+    _fs_build_sensitive_files
+
     # ── /tmp mount options ────────────────────────────────────────────────────
     if _fs_is_separate_mount /tmp; then
         local check_opts=( nodev nosuid )
@@ -168,6 +184,22 @@ filesystem_audit() {
         done
     else
         log_info "filesystem_audit: /tmp is not a separate mount — skipping mount option checks"
+    fi
+
+    # ── /boot mount options ──────────────────────────────────────────────────
+    if _fs_is_separate_mount /boot; then
+        local boot_check_opts=( nosuid nodev noexec )
+        local opt
+        for opt in "${boot_check_opts[@]}"; do
+            if ! _fs_check_mount_opt /boot "${opt}"; then
+                log_warn "FINDING: /boot mount is missing option '${opt}'"
+                (( AUDIT_FINDINGS++ )) || true
+            else
+                log_debug "filesystem_audit: /boot has '${opt}' (OK)"
+            fi
+        done
+    else
+        log_debug "filesystem_audit: /boot is not a separate mount — skipping mount option checks"
     fi
 
     # ── /dev/shm mount options ────────────────────────────────────────────────
@@ -256,6 +288,8 @@ filesystem_audit() {
 filesystem_apply() {
     log_info "filesystem_apply: hardening mount options and file permissions"
 
+    _fs_build_sensitive_files
+
     # ── 1. /tmp mount options ─────────────────────────────────────────────────
     if _fs_is_separate_mount /tmp; then
         local tmp_opts
@@ -295,6 +329,46 @@ filesystem_apply() {
         esac
     else
         log_info "filesystem_apply: /tmp is not a separate mount — skipping fstab update"
+    fi
+
+    # ── 1b. /boot mount options ──────────────────────────────────────────────
+    if _fs_is_separate_mount /boot; then
+        local boot_opts="nosuid,nodev,noexec"
+        local boot_missing=false
+
+        local opt
+        for opt in nosuid nodev noexec; do
+            if ! _fs_check_mount_opt /boot "${opt}"; then
+                boot_missing=true
+                break
+            fi
+        done
+
+        if [[ "${boot_missing}" == "true" ]]; then
+            if ! should_write; then
+                log_info "[DRY-RUN] Would add '${boot_opts}' to /boot fstab entry and remount"
+            else
+                log_change \
+                    "Add ${boot_opts} to /boot mount options in /etc/fstab" \
+                    "Prevent execution of binaries from /boot partition" \
+                    "medium" \
+                    "mount | grep ' /boot '" \
+                    "Restore /etc/fstab from backup and remount with defaults"
+
+                backup_file "/etc/fstab"
+                _fs_fstab_add_opts "/boot" "${boot_opts}"
+                mount -o "remount,${boot_opts}" /boot 2>/dev/null || \
+                    log_warn "filesystem_apply: failed to remount /boot — a reboot may be required"
+
+                log_success "filesystem_apply: /boot mount options updated"
+                (( CHANGES_APPLIED++ )) || true
+            fi
+        else
+            log_debug "filesystem_apply: /boot already has required options — skipping"
+            (( CHANGES_SKIPPED++ )) || true
+        fi
+    else
+        log_debug "filesystem_apply: /boot is not a separate mount — skipping fstab update"
     fi
 
     # ── 2. /dev/shm mount options ─────────────────────────────────────────────
@@ -404,7 +478,13 @@ filesystem_apply() {
         (( CHANGES_APPLIED++ )) || true
     done
 
-    # ── 4. Core dump configuration ────────────────────────────────────────────
+    # ── 4. /proc hidepid — DISABLED ─────────────────────────────────────────
+    # hidepid=2 can cause ext4 errors and read-only root filesystem on some
+    # Debian/Ubuntu kernels due to systemd interactions. Skipped for safety.
+    # To enable manually: mount -o remount,hidepid=2 /proc
+    log_debug "filesystem_apply: /proc hidepid skipped (disabled for safety)"
+
+    # ── 5. Core dump configuration ────────────────────────────────────────────
 
     # PAM limits drop-in
     local limits_content

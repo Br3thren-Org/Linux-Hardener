@@ -97,6 +97,14 @@ parse_args() {
                 FLAG_IMAGES="${2}"
                 shift 2
                 ;;
+            --build-id)
+                if [[ $# -lt 2 ]]; then
+                    printf 'ERROR: --build-id requires an ID argument\n' >&2
+                    exit 1
+                fi
+                FLAG_BUILD_ID="${2}"
+                shift 2
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -557,31 +565,37 @@ main() {
 
     # ── Provision ────────────────────────────────────────────────────────────
 
-    printf '[INFO] Provisioning servers via hetzner/provision.sh...\n'
+    if [[ -n "${FLAG_BUILD_ID:-}" ]]; then
+        BUILD_ID="${FLAG_BUILD_ID}"
+        export BUILD_ID
+        printf '[INFO] Reusing existing build: %s (skipping provisioning)\n' "${BUILD_ID}"
+    else
+        printf '[INFO] Provisioning servers via hetzner/provision.sh...\n'
 
-    local provision_output
-    if ! provision_output="$(
-        HETZNER_API_TOKEN="${HETZNER_API_TOKEN}" \
-        HETZNER_SSH_KEY_NAME="${HETZNER_SSH_KEY_NAME}" \
-        HETZNER_SSH_KEY_PATH="${SSH_KEY_PATH}" \
-        HETZNER_SERVER_TYPE="${HETZNER_SERVER_TYPE}" \
-        HETZNER_LOCATION="${HETZNER_LOCATION}" \
-        HETZNER_IMAGES="${HETZNER_IMAGES}" \
-        bash "${SCRIPT_DIR}/hetzner/provision.sh" 2>&1
-    )"; then
-        printf 'ERROR: Provisioning failed:\n%s\n' "${provision_output}" >&2
-        exit 1
-    fi
+        local provision_output
+        if ! provision_output="$(
+            HETZNER_API_TOKEN="${HETZNER_API_TOKEN}" \
+            HETZNER_SSH_KEY_NAME="${HETZNER_SSH_KEY_NAME}" \
+            HETZNER_SSH_KEY_PATH="${SSH_KEY_PATH}" \
+            HETZNER_SERVER_TYPE="${HETZNER_SERVER_TYPE}" \
+            HETZNER_LOCATION="${HETZNER_LOCATION}" \
+            HETZNER_IMAGES="${HETZNER_IMAGES}" \
+            bash "${SCRIPT_DIR}/hetzner/provision.sh" 2>&1
+        )"; then
+            printf 'ERROR: Provisioning failed:\n%s\n' "${provision_output}" >&2
+            exit 1
+        fi
 
-    printf '%s\n' "${provision_output}"
+        printf '%s\n' "${provision_output}"
 
-    # Build ID is the last line of provision.sh output
-    BUILD_ID="$(printf '%s' "${provision_output}" | tail -n1)"
-    export BUILD_ID
+        # Build ID is the last line of provision.sh output
+        BUILD_ID="$(printf '%s' "${provision_output}" | tail -n1)"
+        export BUILD_ID
 
-    if [[ -z "${BUILD_ID}" ]]; then
-        printf 'ERROR: Could not determine BUILD_ID from provision output.\n' >&2
-        exit 1
+        if [[ -z "${BUILD_ID}" ]]; then
+            printf 'ERROR: Could not determine BUILD_ID from provision output.\n' >&2
+            exit 1
+        fi
     fi
 
     printf '[INFO] BUILD_ID: %s\n' "${BUILD_ID}"

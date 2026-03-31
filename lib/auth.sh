@@ -24,6 +24,9 @@ auth_audit() {
     _auth_audit_usb_storage
     _auth_audit_password_policy
     _auth_audit_login_defs
+    _auth_audit_umask
+    _auth_audit_faillock
+    _auth_audit_grub_password
 }
 
 _auth_audit_login_banner() {
@@ -110,6 +113,50 @@ _auth_audit_password_policy() {
     fi
 }
 
+_auth_audit_umask() {
+    local target
+    for target in /etc/bash.bashrc /etc/profile; do
+        if [[ -f "${target}" ]]; then
+            if ! grep -qE '^umask [0-9]' "${target}" 2>/dev/null; then
+                log_warn "FINDING: umask not set in ${target} (Lynis SHLL-6230)"
+                (( AUDIT_FINDINGS++ )) || true
+            else
+                log_debug "auth_audit: umask is set in ${target} (OK)"
+            fi
+        fi
+    done
+}
+
+_auth_audit_faillock() {
+    if [[ "${ENABLE_FAILLOCK:-true}" != "true" ]]; then
+        log_debug "auth_audit: faillock check skipped (ENABLE_FAILLOCK != true)"
+        return 0
+    fi
+
+    local faillock_conf="/etc/security/faillock.conf"
+    if [[ ! -f "${faillock_conf}" ]] || ! grep -q "^deny" "${faillock_conf}" 2>/dev/null; then
+        log_warn "FINDING: pam_faillock not configured — failed login logging disabled (AUTH-9408)"
+        (( AUDIT_FINDINGS++ )) || true
+    else
+        log_debug "auth_audit: pam_faillock is configured (OK)"
+    fi
+}
+
+_auth_audit_grub_password() {
+    if [[ "${ENABLE_GRUB_PASSWORD:-false}" != "true" ]]; then
+        log_debug "auth_audit: GRUB password check skipped (ENABLE_GRUB_PASSWORD != true)"
+        return 0
+    fi
+
+    local grub_custom="/etc/grub.d/40_custom"
+    if [[ -f "${grub_custom}" ]] && grep -q "set superusers" "${grub_custom}" 2>/dev/null; then
+        log_debug "auth_audit: GRUB password protection configured (OK)"
+    else
+        log_warn "FINDING: GRUB boot loader has no password protection (BOOT-5122)"
+        (( AUDIT_FINDINGS++ )) || true
+    fi
+}
+
 # ─── Apply ────────────────────────────────────────────────────────────────────
 
 auth_apply() {
@@ -124,6 +171,10 @@ auth_apply() {
     _auth_apply_iptables_blacklist
     _auth_apply_password_policy
     _auth_apply_login_defs
+    _auth_apply_umask
+    _auth_apply_faillock
+    _auth_apply_grub_password
+    _auth_apply_coredump_profile
 }
 
 _auth_apply_login_banner() {
@@ -469,6 +520,248 @@ _auth_apply_login_defs() {
         "restore_file ${AUTH_LOGIN_DEFS}"
 }
 
+_auth_apply_umask() {
+    local umask_val="${DEFAULT_UMASK:-027}"
+
+    local umask_line="umask ${umask_val}"
+    local umask_comment="# Hardener: enforce secure default umask (Lynis SHLL-6230)"
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would set umask ${umask_val} in /etc/bash.bashrc and /etc/profile"
+        return 0
+    fi
+
+    local target
+    for target in /etc/bash.bashrc /etc/profile; do
+        if [[ ! -f "${target}" ]]; then
+            log_debug "_auth_apply_umask: ${target} not found, skipping"
+            continue
+        fi
+
+        # Check if our umask line is already present
+        if grep -q "^umask ${umask_val}" "${target}" 2>/dev/null; then
+            log_debug "_auth_apply_umask: umask already set in ${target}"
+            (( CHANGES_SKIPPED++ )) || true
+            continue
+        fi
+
+        backup_file "${target}"
+
+        # Remove any existing umask lines (commented or not) set by us
+        sed -i '/# Hardener: enforce secure default umask/d' "${target}"
+        sed -i '/^umask [0-9]/d' "${target}"
+
+        # Append the umask setting
+        printf '\n%s\n%s\n' "${umask_comment}" "${umask_line}" >> "${target}"
+
+        log_info "_auth_apply_umask: set ${umask_line} in ${target}"
+        (( CHANGES_APPLIED++ )) || true
+    done
+
+    log_change \
+        "Set umask ${umask_val} in /etc/bash.bashrc and /etc/profile" \
+        "Ensure new files have restrictive permissions by default (Lynis SHLL-6230)" \
+        "low" \
+        "grep umask /etc/bash.bashrc /etc/profile" \
+        "Restore /etc/bash.bashrc and /etc/profile from backup"
+}
+
+_auth_apply_faillock() {
+    if [[ "${ENABLE_FAILLOCK:-true}" != "true" ]]; then
+        log_info "_auth_apply_faillock: skipped (ENABLE_FAILLOCK != true)"
+        return 0
+    fi
+
+    # faillock is part of pam_faillock (included in libpam-modules on Debian)
+    local faillock_conf="/etc/security/faillock.conf"
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would configure pam_faillock in ${faillock_conf}"
+        return 0
+    fi
+
+    local content
+    content="$(cat <<'EOF'
+# Managed by linux-hardener — do not edit by hand
+# Lock accounts after failed login attempts (Lynis AUTH-9408)
+deny = 5
+fail_interval = 900
+unlock_time = 600
+even_deny_root
+root_unlock_time = 60
+audit
+EOF
+)"
+
+    write_file_if_changed "${faillock_conf}" "${content}" "Configure pam_faillock for failed login logging"
+
+    # Ensure pam_faillock is enabled in PAM common-auth (Debian)
+    if [[ "${DISTRO_FAMILY:-}" == "debian" ]]; then
+        local pam_auth="/etc/pam.d/common-auth"
+        if [[ -f "${pam_auth}" ]]; then
+            if ! grep -q "pam_faillock.so" "${pam_auth}" 2>/dev/null; then
+                backup_file "${pam_auth}"
+
+                # Insert faillock preauth before pam_unix and authfail after
+                local tmp_pam
+                tmp_pam="$(mktemp)"
+
+                awk '
+                    /^auth.*pam_unix\.so/ && !inserted {
+                        print "auth    required                        pam_faillock.so preauth"
+                        print $0
+                        print "auth    [default=die]                   pam_faillock.so authfail"
+                        inserted=1
+                        next
+                    }
+                    { print }
+                ' "${pam_auth}" > "${tmp_pam}"
+
+                mv "${tmp_pam}" "${pam_auth}"
+                chmod 644 "${pam_auth}"
+
+                log_info "_auth_apply_faillock: pam_faillock added to ${pam_auth}"
+                (( CHANGES_APPLIED++ )) || true
+            else
+                log_debug "_auth_apply_faillock: pam_faillock already in ${pam_auth}"
+                (( CHANGES_SKIPPED++ )) || true
+            fi
+        fi
+
+        # Also add faillock account entry to common-account
+        local pam_account="/etc/pam.d/common-account"
+        if [[ -f "${pam_account}" ]]; then
+            if ! grep -q "pam_faillock.so" "${pam_account}" 2>/dev/null; then
+                backup_file "${pam_account}"
+                printf '\naccount required                        pam_faillock.so\n' >> "${pam_account}"
+                log_info "_auth_apply_faillock: pam_faillock added to ${pam_account}"
+                (( CHANGES_APPLIED++ )) || true
+            fi
+        fi
+    fi
+
+    # Enable faillock on RHEL via authselect
+    if [[ "${DISTRO_FAMILY:-}" == "rhel" ]]; then
+        if command -v authselect &>/dev/null; then
+            local current_profile
+            current_profile="$(authselect current -r 2>/dev/null | head -1 || true)"
+            if [[ -n "${current_profile}" ]]; then
+                if ! authselect current 2>/dev/null | grep -q "with-faillock"; then
+                    authselect select "${current_profile}" with-faillock --force 2>/dev/null || {
+                        log_warn "_auth_apply_faillock: authselect with-faillock failed"
+                    }
+                    log_info "_auth_apply_faillock: enabled faillock via authselect"
+                    (( CHANGES_APPLIED++ )) || true
+                else
+                    log_debug "_auth_apply_faillock: faillock already enabled via authselect"
+                fi
+            fi
+        fi
+    fi
+
+    log_change \
+        "Configure pam_faillock: deny=5, fail_interval=900, unlock_time=600" \
+        "Log and lock out after repeated failed login attempts (Lynis AUTH-9408)" \
+        "medium" \
+        "faillock --user root" \
+        "Restore ${faillock_conf} and PAM files from backup"
+}
+
+_auth_apply_grub_password() {
+    if [[ "${ENABLE_GRUB_PASSWORD:-false}" != "true" ]]; then
+        log_info "_auth_apply_grub_password: skipped (ENABLE_GRUB_PASSWORD != true)"
+        return 0
+    fi
+
+    local grub_custom="/etc/grub.d/40_custom"
+    local grub_password="${GRUB_PASSWORD:-HardenedBoot2026!}"
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would configure GRUB password in ${grub_custom}"
+        return 0
+    fi
+
+    # Check if already configured
+    if [[ -f "${grub_custom}" ]] && grep -q "set superusers" "${grub_custom}" 2>/dev/null; then
+        log_debug "_auth_apply_grub_password: GRUB password already configured"
+        (( CHANGES_SKIPPED++ )) || true
+        return 0
+    fi
+
+    # Generate GRUB password hash
+    local password_hash
+    password_hash="$(printf '%s\n%s\n' "${grub_password}" "${grub_password}" | grub-mkpasswd-pbkdf2 2>/dev/null | grep 'PBKDF2' | awk '{print $NF}')"
+
+    if [[ -z "${password_hash}" ]]; then
+        # Try grub2-mkpasswd-pbkdf2 (RHEL naming)
+        password_hash="$(printf '%s\n%s\n' "${grub_password}" "${grub_password}" | grub2-mkpasswd-pbkdf2 2>/dev/null | grep 'PBKDF2' | awk '{print $NF}')"
+    fi
+
+    if [[ -z "${password_hash}" ]]; then
+        log_warn "_auth_apply_grub_password: grub-mkpasswd-pbkdf2 not available, skipping"
+        return 0
+    fi
+
+    backup_file "${grub_custom}"
+
+    # Append superuser config to 40_custom
+    cat >> "${grub_custom}" <<EOF
+
+# Hardener: GRUB password protection (BOOT-5122)
+set superusers="admin"
+password_pbkdf2 admin ${password_hash}
+EOF
+
+    # Update GRUB config
+    if command -v update-grub &>/dev/null; then
+        update-grub 2>/dev/null || log_warn "_auth_apply_grub_password: update-grub failed"
+    elif command -v grub2-mkconfig &>/dev/null; then
+        local grub_cfg="/boot/grub2/grub.cfg"
+        [[ -f "/boot/efi/EFI/fedora/grub.cfg" ]] && grub_cfg="/boot/efi/EFI/fedora/grub.cfg"
+        [[ -f "/boot/efi/EFI/rocky/grub.cfg" ]] && grub_cfg="/boot/efi/EFI/rocky/grub.cfg"
+        [[ -f "/boot/efi/EFI/almalinux/grub.cfg" ]] && grub_cfg="/boot/efi/EFI/almalinux/grub.cfg"
+        grub2-mkconfig -o "${grub_cfg}" 2>/dev/null || log_warn "_auth_apply_grub_password: grub2-mkconfig failed"
+    fi
+
+    log_change \
+        "GRUB password protection configured in ${grub_custom}" \
+        "Prevent unauthorized boot configuration changes (Lynis BOOT-5122)" \
+        "medium" \
+        "grep superusers ${grub_custom}" \
+        "Restore ${grub_custom} from backup and run update-grub"
+
+    log_success "_auth_apply_grub_password: GRUB password protection enabled"
+    (( CHANGES_APPLIED++ )) || true
+}
+
+_auth_apply_coredump_profile() {
+    local profile_file="/etc/profile"
+    local coredump_line="ulimit -S -c 0 > /dev/null 2>&1"
+    local coredump_comment="# Hardener: disable core dumps (KRNL-5820)"
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would add core dump disable to ${profile_file}"
+        return 0
+    fi
+
+    if [[ ! -f "${profile_file}" ]]; then
+        log_debug "_auth_apply_coredump_profile: ${profile_file} not found, skipping"
+        return 0
+    fi
+
+    if grep -q "ulimit.*-c.*0" "${profile_file}" 2>/dev/null; then
+        log_debug "_auth_apply_coredump_profile: core dump already disabled in ${profile_file}"
+        (( CHANGES_SKIPPED++ )) || true
+        return 0
+    fi
+
+    backup_file "${profile_file}"
+    printf '\n%s\n%s\n' "${coredump_comment}" "${coredump_line}" >> "${profile_file}"
+
+    log_info "_auth_apply_coredump_profile: core dump disable added to ${profile_file}"
+    (( CHANGES_APPLIED++ )) || true
+}
+
 # ─── Rollback ─────────────────────────────────────────────────────────────────
 
 auth_rollback() {
@@ -481,6 +774,11 @@ auth_rollback() {
         "/etc/at.allow"
         "${AUTH_PWQUALITY_CONF}"
         "${AUTH_LOGIN_DEFS}"
+        "/etc/bash.bashrc"
+        "/etc/profile"
+        "/etc/security/faillock.conf"
+        "/etc/pam.d/common-auth"
+        "/etc/pam.d/common-account"
     )
 
     local target

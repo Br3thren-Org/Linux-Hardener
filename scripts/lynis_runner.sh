@@ -68,6 +68,13 @@ cmd_install() {
     # shellcheck source=../lib/common.sh
     source "${PARENT_DIR}/lib/common.sh"
 
+    # Source config if present (provides LYNIS_SOURCE, LYNIS_QUICK, etc.)
+    local config_file="${PARENT_DIR}/config/hardener.conf"
+    if [[ -f "${config_file}" ]]; then
+        # shellcheck source=/dev/null
+        source "${config_file}"
+    fi
+
     detect_distro
 
     case "${DISTRO_FAMILY}" in
@@ -96,7 +103,7 @@ cmd_install() {
 
     printf 'Lynis installed at: %s\n' "${bin}"
     printf 'Version: '
-    "${bin}" --version
+    (cd "$(dirname "${bin}")" && "${bin}" --version) || true
 }
 
 # ─── Subcommand: run <label> ──────────────────────────────────────────────────
@@ -139,9 +146,13 @@ cmd_run() {
     # Run lynis, tee output to stdout log and to terminal
     # lynis writes its detailed log to /var/log/lynis.log and
     # machine-readable report to /var/log/lynis-report.dat
+    # Lynis must be run from its own directory when installed via git clone.
+    # Lynis returns non-zero when warnings/suggestions exist — this is expected.
+    local lynis_dir
+    lynis_dir="$(dirname "${bin}")"
     # shellcheck disable=SC2086
-    "${bin}" audit system --no-colors --no-log ${quick_flag} \
-        | tee "${stdout_log}"
+    (cd "${lynis_dir}" && "${bin}" audit system --no-colors --no-log ${quick_flag}) \
+        | tee "${stdout_log}" || true
 
     # Copy lynis log and report to artifact dir
     if [[ -f "${LYNIS_LOG}" ]]; then

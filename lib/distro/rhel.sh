@@ -280,13 +280,15 @@ rhel_install_lynis() {
                 return 0
             fi
             if ! should_write; then
-                log_info "[DRY-RUN] Would run: dnf install -y epel-release lynis"
+                log_info "[DRY-RUN] Would run: dnf install -y lynis (via EPEL if needed)"
                 return 0
             fi
-            # Lynis lives in EPEL on RHEL-family systems
-            dnf install -y epel-release
+            # Fedora has Lynis in main repos; RHEL-family needs EPEL
+            if [[ "${DISTRO_ID}" != "fedora" ]]; then
+                dnf install -y epel-release || log_warn "Could not install epel-release — Lynis may not be available"
+            fi
             pkg_install lynis
-            log_success "Lynis installed via dnf (EPEL)"
+            log_success "Lynis installed via dnf"
             ;;
 
         cisofy-repo)

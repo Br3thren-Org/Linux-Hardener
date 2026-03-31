@@ -33,6 +33,7 @@ Modules (execution order):
   filesystem  Set secure mount options and file permissions
   logging     Configure system logging and audit rules
   integrity   Deploy file-integrity monitoring (AIDE)
+  systemd_hardening  Apply security sandboxing to systemd services
 
 Examples:
   sudo $(basename "${0}") --audit
@@ -192,6 +193,7 @@ readonly MODULES=(
     filesystem
     logging
     integrity
+    systemd_hardening
 )
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

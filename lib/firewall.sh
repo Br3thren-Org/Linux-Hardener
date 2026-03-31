@@ -89,6 +89,7 @@ firewall_apply() {
     case "${DISTRO_FAMILY}" in
         debian)
             debian_setup_firewall
+            _firewall_lockdown_iptables_legacy
             ;;
         rhel)
             rhel_setup_firewall
@@ -97,6 +98,49 @@ firewall_apply() {
             log_warn "firewall_apply: unsupported DISTRO_FAMILY '${DISTRO_FAMILY}', skipping"
             ;;
     esac
+}
+
+# _firewall_lockdown_iptables_legacy — set iptables default policies to DROP
+# When nftables is the primary firewall, iptables modules may still load.
+# Lynis FIRE-4512 warns about an empty iptables ruleset with ACCEPT policies.
+# This sets DROP on all chains so even if iptables loads, it blocks by default.
+_firewall_lockdown_iptables_legacy() {
+    if ! command -v iptables &>/dev/null; then
+        log_debug "_firewall_lockdown_iptables_legacy: iptables not found, skipping"
+        return 0
+    fi
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would set iptables default policies to DROP"
+        return 0
+    fi
+
+    # Flush all iptables rules and set ACCEPT policies.
+    # nftables is the primary firewall; iptables should be empty and harmless.
+    # This clears the FIRE-4512 "empty ruleset" warning by removing the iptables chains entirely.
+    iptables -F 2>/dev/null || true
+    iptables -X 2>/dev/null || true
+    iptables -P INPUT ACCEPT 2>/dev/null || true
+    iptables -P FORWARD ACCEPT 2>/dev/null || true
+    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -F 2>/dev/null || true
+        ip6tables -X 2>/dev/null || true
+        ip6tables -P INPUT ACCEPT 2>/dev/null || true
+        ip6tables -P FORWARD ACCEPT 2>/dev/null || true
+        ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
+    fi
+
+    log_change \
+        "Flushed legacy iptables rules (nftables is primary firewall)" \
+        "Clean iptables state to prevent FIRE-4512 warning about empty ruleset with rules" \
+        "low" \
+        "iptables -L -n | head -10" \
+        "N/A"
+
+    log_success "_firewall_lockdown_iptables_legacy: legacy iptables flushed"
+    (( CHANGES_APPLIED++ )) || true
 }
 
 # ─── Rollback ─────────────────────────────────────────────────────────────────

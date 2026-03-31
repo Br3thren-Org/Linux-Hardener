@@ -141,7 +141,11 @@ packages_apply() {
             fi
             ;;
         rhel)
-            local rhel_security_pkgs=(psacct sysstat curl)
+            # Install EPEL for rkhunter (not available in base repos)
+            if [[ "${DISTRO_ID:-}" != "fedora" ]]; then
+                dnf install -y epel-release 2>/dev/null || true
+            fi
+            local rhel_security_pkgs=(psacct sysstat curl rkhunter)
             for pkg in "${rhel_security_pkgs[@]}"; do
                 if ! pkg_is_installed "${pkg}"; then
                     if should_write; then
@@ -155,6 +159,12 @@ packages_apply() {
                     log_debug "packages_apply: ${pkg} already installed (OK)"
                 fi
             done
+
+            # Initialize rkhunter database if just installed
+            if should_write && pkg_is_installed rkhunter; then
+                rkhunter --propupd 2>/dev/null || true
+                log_info "rkhunter database initialized (RHEL)"
+            fi
             ;;
         *)
             log_debug "packages_apply: no security-enhancing packages defined for DISTRO_FAMILY '${DISTRO_FAMILY}'"

@@ -1,6 +1,6 @@
 # Linux Hardener
 
-A modular Linux hardening framework that achieves **85 Lynis hardening index** on fresh cloud instances, with automated Hetzner Cloud test orchestration and remote deployment to any SSH-accessible machine.
+A modular Linux hardening framework that achieves **85–89 Lynis hardening index** on fresh cloud instances, with automated Hetzner Cloud test orchestration and remote deployment to any SSH-accessible machine.
 
 Production-safe, auditable, reversible, distro-aware. Every change includes a reason, risk note, validation step, and rollback path.
 
@@ -8,18 +8,24 @@ Production-safe, auditable, reversible, distro-aware. Every change includes a re
 
 | Distro | Before | After | Delta | Validation |
 |---|---|---|---|---|
-| Debian 12 | 61 | **83** | +22 | 19/19 PASS |
-| Debian 13 (Trixie) | ~58 | **85** | +27 | 19/19 PASS |
-| Ubuntu 24.04 | 58 | **78** | +20 | 19/19 PASS |
-| Rocky Linux 9 | 66 | **83** | +17 | 19/19 PASS |
-| AlmaLinux 9 | 66 | **83** | +17 | 19/19 PASS |
+| Debian 12 (Bookworm) | 64 | **88** | +24 | 19/19 PASS |
+| Debian 13 (Trixie) | 67 | **89** | +22 | 19/19 PASS |
+| Ubuntu 24.04 | 60 | **82** | +22 | 19/19 PASS |
+| Fedora 43 | 65 | **88** | +23 | 18/19 PASS |
+| Rocky Linux 9 | 66 | **85** | +19 | 19/19 PASS |
+| Rocky Linux 10 | 66 | **85** | +19 | 19/19 PASS |
+| AlmaLinux 9 | 66 | **85** | +19 | 19/19 PASS |
+| AlmaLinux 10 | 66 | **85** | +19 | 19/19 PASS |
+
+*Tested on Hetzner CX33 (4 vCPU, 8 GB RAM) — 2026-03-31*
 
 ## Supported Platforms
 
 - Debian 12 / 13
 - Ubuntu 24.04
-- Rocky Linux 9
-- AlmaLinux 9
+- Fedora 43
+- Rocky Linux 9 / 10
+- AlmaLinux 9 / 10
 
 ## Quick Start — Harden Any Remote Machine
 

@@ -115,7 +115,7 @@ detect_distro() {
     case "${id}" in
         debian|ubuntu)
             DISTRO_FAMILY="debian" ;;
-        rocky|almalinux|rhel|centos)
+        rocky|almalinux|rhel|centos|fedora)
             DISTRO_FAMILY="rhel" ;;
         *)
             # Check ID_LIKE for derivatives
