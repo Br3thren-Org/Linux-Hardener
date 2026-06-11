@@ -127,6 +127,32 @@ Supported levels: `raid0`, `raid1`, `raid5`, `raid6`, `raid10`.
 
 See `docs/superpowers/specs/2026-03-31-luks-encrypted-provisioning-design.md` for full documentation.
 
+## LUKS Runtime Encryption (Existing Hosts)
+
+For machines that are **already installed**, the optional `luks` module adds
+at-rest encryption without reinstalling. It detects bare-metal vs. VPS at
+runtime: bare-metal hosts get root-LUKS hardening (TPM2 auto-unlock with
+Secure-Boot-aware PCR policy, GPG-encrypted header backups, optional dropbear
+remote unlock); VPSs get encrypted data volumes/containers and random-key
+encrypted swap — the root disk, bootloader, and initramfs are never touched.
+
+```bash
+# 1. Enable in config/luks.conf (disabled by default)
+LUKS_ENABLED=yes
+
+# 2. Preview, then apply only the encryption module
+sudo ./harden.sh --dry-run --luks-only
+sudo ./harden.sh --apply  --luks-only
+
+# Force a path instead of auto-detection
+sudo ./harden.sh --apply --luks-only --luks-mode virtual
+```
+
+Recovery tooling: `scripts/luks-recovery.sh` (bare-metal: header restore,
+temp key slots, safe initramfs/GRUB regen) and `scripts/luks-cloud-recovery.sh`
+(VPS: keyfile → KMS → passphrase remount chain). Full documentation, decision
+matrix, and threat model: `docs/LUKS.md`.
+
 ## Quick Start — Standalone (On Target)
 
 ```bash
@@ -209,8 +235,12 @@ Linux-Hardener/
 ├── orchestrate.sh            # Hetzner test orchestrator
 ├── config/
 │   ├── hardener.conf.example # Config template
+│   ├── luks.conf             # Runtime LUKS module config (disabled by default)
 │   ├── auto-remediate.conf   # Lynis auto-fix whitelist
 │   └── ssh-banner.txt        # Login banner
+├── modules/
+│   ├── 20_luks.sh            # Optional at-rest encryption module
+│   └── luks.d/               # env detection, bare-metal/VPS paths, KMS/NBDE
 ├── lib/
 │   ├── common.sh             # Core: logging, detection, helpers
 │   ├── packages.sh           # Package updates, security tools
@@ -230,7 +260,9 @@ Linux-Hardener/
 │   ├── lynis_runner.sh       # Install/run Lynis audits
 │   ├── lynis_parser.py       # Parse Lynis → JSON
 │   ├── report_generator.py   # Final reports + cross-distro aggregation
-│   └── validate.sh           # Post-hardening checks (19 checks)
+│   ├── luks-recovery.sh      # Bare-metal LUKS recovery (headers, key slots, boot)
+│   ├── luks-cloud-recovery.sh# VPS LUKS recovery (remount, console guidance)
+│   └── validate.sh           # Post-hardening checks (incl. LUKS section)
 ├── hetzner/
 │   ├── provision.sh          # Create test servers (hcloud + API fallback)
 │   ├── teardown.sh           # Destroy test servers
@@ -260,6 +292,8 @@ Linux-Hardener/
 | 7 | `filesystem` | Mount options (noexec /tmp, /dev/shm), file permissions, core dump restriction |
 | 8 | `logging` | Time sync (chrony), journald persistence, auditd with minimal/CIS-basic rules |
 | 9 | `integrity` | Fail2ban SSH jail, AIDE with SHA512, rkhunter, debsums weekly verification |
+| 10 | `systemd_hardening` | Security sandboxing drop-ins for systemd services |
+| 11 | `luks` | Optional at-rest encryption (disabled by default; see `docs/LUKS.md`) |
 
 ## Rollback
 
