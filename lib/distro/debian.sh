@@ -299,10 +299,11 @@ debian_install_lynis() {
             local repo_entry
             repo_entry="deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/cisofy-software-public.gpg] https://packages.cisofy.com/community/lynis/deb/ stable main"
 
+            # || true: returns 2 when unchanged, which aborts set -e callers
             write_file_if_changed \
                 "/etc/apt/sources.list.d/cisofy-lynis.list" \
                 "${repo_entry}" \
-                "Add CISOfy Lynis repository"
+                "Add CISOfy Lynis repository" || true
 
             DEBIAN_FRONTEND=noninteractive apt-get update -y
             pkg_install lynis

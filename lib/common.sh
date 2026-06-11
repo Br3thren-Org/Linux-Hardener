@@ -183,6 +183,9 @@ apply_profile_defaults() {
             : "${ENABLE_AUDITD:=false}"
             : "${ENABLE_AIDE:=false}"
             : "${ENABLE_UNATTENDED_UPGRADES:=false}"
+            : "${ENABLE_GRUB_PASSWORD:=false}"
+            : "${ENABLE_TMPFS_TMP:=false}"
+            : "${ENABLE_COMPILER_RESTRICT:=false}"
             ;;
         aggressive|*)
             : "${NOEXEC_TMP:=true}"
@@ -191,6 +194,9 @@ apply_profile_defaults() {
             : "${ENABLE_AUDITD:=true}"
             : "${ENABLE_AIDE:=true}"
             : "${ENABLE_UNATTENDED_UPGRADES:=true}"
+            : "${ENABLE_GRUB_PASSWORD:=true}"
+            : "${ENABLE_TMPFS_TMP:=true}"
+            : "${ENABLE_COMPILER_RESTRICT:=true}"
             ;;
     esac
 }

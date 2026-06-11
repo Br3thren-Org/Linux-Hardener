@@ -114,12 +114,22 @@ _integrity_apply_fail2ban() {
         log_debug "integrity_apply: fail2ban already installed (OK)"
     fi
 
-    # Build jail config content
+    # Build jail config content. banaction must match the active firewall:
+    # the fail2ban default (iptables-*) loads iptables kernel modules next to
+    # our nftables ruleset and triggers Lynis FIRE-4512 ("iptables modules
+    # loaded, but no rules active"). On RHEL, fail2ban-firewalld already sets
+    # banaction via jail.d/00-firewalld.conf — do not override it there.
+    local jail_default=""
+    if [[ "${DISTRO_FAMILY:-}" == "debian" ]]; then
+        jail_default="[DEFAULT]
+banaction = nftables-multiport
+banaction_allports = nftables-allports
+"
+    fi
+
     local jail_content
     jail_content="$(cat <<EOF
-[DEFAULT]
-banaction = %(banaction_allports)s
-
+${jail_default}
 [sshd]
 enabled = true
 port = ${SSH_PORT:-22}
@@ -250,26 +260,19 @@ _integrity_apply_aide() {
         fi
 
         if [[ -n "${aide_conf_main:-}" ]]; then
-            # Check if SHA512 is already in the checksum config
+            # SHA512 must be visible in the MAIN config file: Lynis FINT-4402
+            # greps only aide.conf itself, so a conf.d drop-in never clears the
+            # finding. Debian's stock "Checksums = H" hides the algorithms
+            # behind a macro — replace it with an explicit definition.
             if ! grep -qE '^\s*(Checksums|CONTENT_EX|DATAONLY).*sha512' "${aide_conf_main}" 2>/dev/null; then
-                # Add SHA512 to default checksum group or create a drop-in
-                local aide_dropin_dir="/etc/aide/aide.conf.d"
-                [[ ! -d "${aide_dropin_dir}" ]] && aide_dropin_dir=""
-
-                if [[ -n "${aide_dropin_dir}" ]]; then
-                    local sha_dropin="${aide_dropin_dir}/99_hardener_sha512"
-                    local sha_content="# Hardener: use SHA512 for checksums (FINT-4402)
-CONTENT_EX = sha512+ftype+p+u+g+n+acl+selinux+xattrs"
-                    write_file_if_changed "${sha_dropin}" "${sha_content}" "Configure AIDE SHA512 checksums"
+                backup_file "${aide_conf_main}"
+                if grep -qE '^\s*Checksums\s*=' "${aide_conf_main}"; then
+                    sed -i -E 's/^\s*Checksums\s*=.*/Checksums = sha512/' "${aide_conf_main}"
                 else
-                    # Append to main config
-                    backup_file "${aide_conf_main}"
-                    if ! grep -q 'sha512' "${aide_conf_main}" 2>/dev/null; then
-                        printf '\n# Hardener: use SHA512 for checksums (FINT-4402)\nCONTENT_EX = sha512+ftype+p+u+g+n+acl+selinux+xattrs\n' >> "${aide_conf_main}"
-                        log_info "integrity_apply: added SHA512 to AIDE config"
-                        (( CHANGES_APPLIED++ )) || true
-                    fi
+                    printf '\n# Hardener: use SHA512 for checksums (FINT-4402)\nChecksums = sha512\n' >> "${aide_conf_main}"
                 fi
+                log_info "integrity_apply: AIDE checksums set to SHA512 in ${aide_conf_main}"
+                (( CHANGES_APPLIED++ )) || true
             else
                 log_debug "integrity_apply: AIDE already uses SHA512 checksums (OK)"
             fi

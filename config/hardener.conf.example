@@ -37,6 +37,26 @@ NOEXEC_TMP="true"
 NOEXEC_DEV_SHM="true"
 
 # -----------------------------------------------------------------------------
+# Boot loader
+# ENABLE_GRUB_PASSWORD: require credentials to EDIT boot entries (normal,
+#   unattended booting is never affected — verified at apply time). A random
+#   password is generated and printed ONCE unless GRUB_PASSWORD is set.
+#   Defaults: aggressive=true, standard=false.
+# -----------------------------------------------------------------------------
+#ENABLE_GRUB_PASSWORD="true"
+GRUB_PASSWORD=""
+
+# -----------------------------------------------------------------------------
+# Hardening extras
+# ENABLE_TMPFS_TMP: mount /tmp as tmpfs when it is not a separate partition
+#   (Lynis FILE-6310). ENABLE_COMPILER_RESTRICT: remove world access from
+#   compiler binaries (Lynis HRDN-7222; package upgrades may restore modes).
+#   Defaults: aggressive=true, standard=false.
+# -----------------------------------------------------------------------------
+#ENABLE_TMPFS_TMP="true"
+#ENABLE_COMPILER_RESTRICT="true"
+
+# -----------------------------------------------------------------------------
 # Auth
 # SHELL_TIMEOUT: idle shell timeout in seconds (900 = 15 minutes).
 # LOGIN_BANNER_FILE: path to a custom banner file, or leave empty to use the
@@ -71,17 +91,25 @@ ENABLE_AIDE="true"
 
 # -----------------------------------------------------------------------------
 # Sysctl
+# ENABLE_MODULES_DISABLED: set kernel.modules_disabled=1 at the END of boot
+#   (Lynis KRNL-6000). ONE-WAY until reboot: nothing can load kernel modules
+#   afterwards — breaks on-demand module loading (LUKS module runtime, USB,
+#   new filesystem mounts). Leave false unless the workload is fully static.
 # -----------------------------------------------------------------------------
 DISABLE_IPV6="false"
 RESTRICT_DMESG="true"
 RESTRICT_KPTR="true"
+ENABLE_MODULES_DISABLED="false"
 
 # -----------------------------------------------------------------------------
 # Lynis
-# LYNIS_SOURCE: package | git
+# LYNIS_SOURCE: package | cisofy-repo | github
+#   cisofy-repo (default) tracks the current upstream release — distro
+#   packages lag and trigger Lynis's own "release is older than 4 months"
+#   suggestion against you.
 # LYNIS_QUICK: skip wait prompts when set to true.
 # -----------------------------------------------------------------------------
-LYNIS_SOURCE="package"
+LYNIS_SOURCE="cisofy-repo"
 LYNIS_QUICK="true"
 
 # -----------------------------------------------------------------------------

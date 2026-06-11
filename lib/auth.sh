@@ -667,44 +667,91 @@ EOF
         "Restore ${faillock_conf} and PAM files from backup"
 }
 
+# GRUB password (BOOT-5122). Protects against console attackers editing boot
+# entries (init=/bin/bash etc.) while keeping UNATTENDED BOOT working:
+#   - RHEL family: grub2-setpassword — RHEL's patched GRUB only requires the
+#     password for editing entries, never for booting them.
+#   - Debian family: superusers in 40_custom PLUS --unrestricted on the menu
+#     entry class in 10_linux. Without --unrestricted, GRUB demands credentials
+#     to BOOT anything and an unattended reboot hangs at the menu forever.
+#     The generated grub.cfg is verified and everything reverts if the
+#     unattended-boot condition does not hold.
 _auth_apply_grub_password() {
     if [[ "${ENABLE_GRUB_PASSWORD:-false}" != "true" ]]; then
         log_info "_auth_apply_grub_password: skipped (ENABLE_GRUB_PASSWORD != true)"
         return 0
     fi
 
-    local grub_custom="/etc/grub.d/40_custom"
-    local grub_password="${GRUB_PASSWORD:-HardenedBoot2026!}"
-
     if ! should_write; then
-        log_info "[DRY-RUN] Would configure GRUB password in ${grub_custom}"
+        log_info "[DRY-RUN] Would configure GRUB password protection (boot stays unattended)"
         return 0
     fi
 
-    # Check if already configured
-    if [[ -f "${grub_custom}" ]] && grep -q "set superusers" "${grub_custom}" 2>/dev/null; then
+    local grub_custom="/etc/grub.d/40_custom"
+    if { [[ -f "${grub_custom}" ]] && grep -q "set superusers" "${grub_custom}" 2>/dev/null; } \
+            || [[ -s /boot/grub2/user.cfg ]]; then
         log_debug "_auth_apply_grub_password: GRUB password already configured"
         (( CHANGES_SKIPPED++ )) || true
         return 0
     fi
 
-    # Generate GRUB password hash
-    local password_hash
-    password_hash="$(printf '%s\n%s\n' "${grub_password}" "${grub_password}" | grub-mkpasswd-pbkdf2 2>/dev/null | grep 'PBKDF2' | awk '{print $NF}')"
-
-    if [[ -z "${password_hash}" ]]; then
-        # Try grub2-mkpasswd-pbkdf2 (RHEL naming)
-        password_hash="$(printf '%s\n%s\n' "${grub_password}" "${grub_password}" | grub2-mkpasswd-pbkdf2 2>/dev/null | grep 'PBKDF2' | awk '{print $NF}')"
+    # Never a hardcoded default: generate a strong random password unless the
+    # operator supplied one, and print it exactly once.
+    local grub_password="${GRUB_PASSWORD:-}"
+    local generated=false
+    if [[ -z "${grub_password}" ]]; then
+        grub_password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+        generated=true
     fi
 
-    if [[ -z "${password_hash}" ]]; then
+    # ── RHEL family: write user.cfg directly (what grub2-setpassword does —
+    # the tool itself needs a TTY and cannot run unattended). RHEL's patched
+    # GRUB only requires the password for editing entries, never for booting.
+    if command -v grub2-setpassword &>/dev/null; then
+        local rhel_hash
+        rhel_hash="$(printf '%s\n%s\n' "${grub_password}" "${grub_password}" | grub2-mkpasswd-pbkdf2 2>/dev/null | grep 'PBKDF2' | awk '{print $NF}')"
+        if [[ -n "${rhel_hash}" ]]; then
+            ( umask 077; printf 'GRUB2_PASSWORD=%s\n' "${rhel_hash}" > /boot/grub2/user.cfg )
+            [[ "${generated}" == "true" ]] && \
+                log_warn "_auth_apply_grub_password: GRUB PASSWORD (user 'root', store offline, shown once): ${grub_password}"
+            log_change \
+                "GRUB password set via /boot/grub2/user.cfg" \
+                "Require credentials to edit boot entries (Lynis BOOT-5122)" \
+                "medium" \
+                "test -s /boot/grub2/user.cfg" \
+                "rm -f /boot/grub2/user.cfg"
+            log_success "_auth_apply_grub_password: GRUB password protection enabled (booting unaffected)"
+            (( CHANGES_APPLIED++ )) || true
+        else
+            log_warn "_auth_apply_grub_password: grub2-mkpasswd-pbkdf2 failed, skipping"
+        fi
+        return 0
+    fi
+
+    # ── Debian family ────────────────────────────────────────────────────────
+    local mkpasswd="grub-mkpasswd-pbkdf2"
+    command -v "${mkpasswd}" &>/dev/null || mkpasswd="grub2-mkpasswd-pbkdf2"
+    if ! command -v "${mkpasswd}" &>/dev/null; then
         log_warn "_auth_apply_grub_password: grub-mkpasswd-pbkdf2 not available, skipping"
         return 0
     fi
 
-    backup_file "${grub_custom}"
+    local password_hash
+    password_hash="$(printf '%s\n%s\n' "${grub_password}" "${grub_password}" | "${mkpasswd}" 2>/dev/null | grep 'PBKDF2' | awk '{print $NF}')"
+    if [[ -z "${password_hash}" ]]; then
+        log_warn "_auth_apply_grub_password: failed to generate PBKDF2 hash, skipping"
+        return 0
+    fi
 
-    # Append superuser config to 40_custom
+    local grub_linux="/etc/grub.d/10_linux"
+    if [[ ! -f "${grub_linux}" ]]; then
+        log_warn "_auth_apply_grub_password: ${grub_linux} not found — cannot guarantee unattended boot, skipping"
+        return 0
+    fi
+
+    backup_file "${grub_custom}"
+    backup_file "${grub_linux}"
+
     cat >> "${grub_custom}" <<EOF
 
 # Hardener: GRUB password protection (BOOT-5122)
@@ -712,25 +759,45 @@ set superusers="admin"
 password_pbkdf2 admin ${password_hash}
 EOF
 
-    # Update GRUB config
-    if command -v update-grub &>/dev/null; then
-        update-grub 2>/dev/null || log_warn "_auth_apply_grub_password: update-grub failed"
-    elif command -v grub2-mkconfig &>/dev/null; then
-        local grub_cfg="/boot/grub2/grub.cfg"
-        [[ -f "/boot/efi/EFI/fedora/grub.cfg" ]] && grub_cfg="/boot/efi/EFI/fedora/grub.cfg"
-        [[ -f "/boot/efi/EFI/rocky/grub.cfg" ]] && grub_cfg="/boot/efi/EFI/rocky/grub.cfg"
-        [[ -f "/boot/efi/EFI/almalinux/grub.cfg" ]] && grub_cfg="/boot/efi/EFI/almalinux/grub.cfg"
-        grub2-mkconfig -o "${grub_cfg}" 2>/dev/null || log_warn "_auth_apply_grub_password: grub2-mkconfig failed"
+    # Keep normal boots password-free: tag generated entries --unrestricted
+    if ! grep -q 'CLASS=.*--unrestricted' "${grub_linux}"; then
+        sed -i -E 's/^(CLASS="[^"]*)"/\1 --unrestricted"/' "${grub_linux}"
     fi
 
-    log_change \
-        "GRUB password protection configured in ${grub_custom}" \
-        "Prevent unauthorized boot configuration changes (Lynis BOOT-5122)" \
-        "medium" \
-        "grep superusers ${grub_custom}" \
-        "Restore ${grub_custom} from backup and run update-grub"
+    local regen_ok=true
+    if command -v update-grub &>/dev/null; then
+        update-grub 2>/dev/null || regen_ok=false
+    else
+        grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || regen_ok=false
+    fi
 
-    log_success "_auth_apply_grub_password: GRUB password protection enabled"
+    # SAFETY GATE: superusers without --unrestricted entries means every boot
+    # waits for credentials — revert everything unless both are in grub.cfg.
+    local grub_cfg="/boot/grub/grub.cfg"
+    if [[ "${regen_ok}" != "true" ]] \
+            || ! grep -q 'set superusers' "${grub_cfg}" 2>/dev/null \
+            || ! grep -q -- '--unrestricted' "${grub_cfg}" 2>/dev/null; then
+        log_error "_auth_apply_grub_password: generated grub.cfg failed the unattended-boot check — reverting"
+        restore_file "${grub_custom}" || true
+        restore_file "${grub_linux}" || true
+        if command -v update-grub &>/dev/null; then
+            update-grub 2>/dev/null || true
+        fi
+        (( CHANGES_FAILED++ )) || true
+        return 1
+    fi
+
+    [[ "${generated}" == "true" ]] && \
+        log_warn "_auth_apply_grub_password: GRUB PASSWORD (user 'admin', store offline, shown once): ${grub_password}"
+
+    log_change \
+        "GRUB password protection configured in ${grub_custom} (+ --unrestricted boot entries)" \
+        "Require credentials to edit boot entries; normal boot unaffected (Lynis BOOT-5122)" \
+        "medium" \
+        "grep superusers ${grub_custom}; grep -- --unrestricted ${grub_cfg}" \
+        "Restore ${grub_custom} and ${grub_linux} from backup and run update-grub"
+
+    log_success "_auth_apply_grub_password: GRUB password protection enabled (booting unaffected)"
     (( CHANGES_APPLIED++ )) || true
 }
 

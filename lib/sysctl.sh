@@ -255,6 +255,68 @@ sysctl_apply() {
     else
         log_success "sysctl_apply: all settings verified successfully"
     fi
+
+    _sysctl_modules_disabled_unit
+}
+
+# ─── kernel.modules_disabled (opt-in, Lynis KRNL-6000) ──────────────────────
+
+readonly _SYSCTL_MODLOCK_UNIT="/etc/systemd/system/hardener-modules-disabled.service"
+
+# kernel.modules_disabled=1 is a ONE-WAY switch (until reboot): once set, no
+# kernel module can be loaded at all. It must NOT go into sysctl.d — applied
+# early in boot it races module autoloading (netfilter, filesystems) and can
+# break boot. Instead a oneshot unit flips it at the very end of boot.
+# Disabled by default: it also breaks anything that loads modules on demand
+# later (the LUKS module needs dm-crypt/loop, USB recovery, new mounts).
+_sysctl_modules_disabled_unit() {
+    if [[ "${ENABLE_MODULES_DISABLED:-false}" != "true" ]]; then
+        log_debug "sysctl_apply: kernel.modules_disabled unit skipped (ENABLE_MODULES_DISABLED != true)"
+        return 0
+    fi
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would install ${_SYSCTL_MODLOCK_UNIT} (sets kernel.modules_disabled=1 at end of boot)"
+        return 0
+    fi
+
+    local unit_content
+    unit_content="$(cat <<'EOF'
+# Managed by linux-hardener — do not edit by hand.
+# Locks kernel module loading once boot is complete (KRNL-6000).
+# One-way until reboot: anything needing a new module afterwards will fail.
+[Unit]
+Description=Disable kernel module loading (linux-hardener)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/sysctl -w kernel.modules_disabled=1
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)"
+
+    local write_rc=0
+    write_file_if_changed "${_SYSCTL_MODLOCK_UNIT}" "${unit_content}" \
+        "kernel.modules_disabled late-boot unit" || write_rc=$?
+    if [[ "${write_rc}" -ne 0 && "${write_rc}" -ne 2 ]]; then
+        (( CHANGES_FAILED++ )) || true
+        return 1
+    fi
+    systemctl daemon-reload
+    systemctl enable hardener-modules-disabled.service &>/dev/null
+
+    log_change \
+        "Enable kernel.modules_disabled=1 at end of boot" \
+        "Prevent kernel module loading after boot completes (Lynis KRNL-6000)" \
+        "high" \
+        "sysctl -n kernel.modules_disabled (after reboot)" \
+        "systemctl disable hardener-modules-disabled.service; rm -f ${_SYSCTL_MODLOCK_UNIT}; reboot"
+
+    log_info "sysctl_apply: module-loading lock installed — takes effect at the END of the next boot"
 }
 
 # ─── sysctl_rollback ──────────────────────────────────────────────────────────
@@ -272,6 +334,13 @@ sysctl_rollback() {
     done
     if [[ "${removed}" == "false" ]]; then
         log_debug "sysctl_rollback: drop-in not present, nothing to remove"
+    fi
+
+    if [[ -f "${_SYSCTL_MODLOCK_UNIT}" ]]; then
+        systemctl disable hardener-modules-disabled.service &>/dev/null || true
+        rm -f "${_SYSCTL_MODLOCK_UNIT}"
+        systemctl daemon-reload 2>/dev/null || true
+        log_info "sysctl_rollback: removed module-loading lock unit (effective after reboot)"
     fi
 
     log_info "sysctl_rollback: reloading sysctl settings with 'sysctl --system'"

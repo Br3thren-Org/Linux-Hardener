@@ -328,8 +328,11 @@ filesystem_apply() {
                 ;;
         esac
     else
-        log_info "filesystem_apply: /tmp is not a separate mount — skipping fstab update"
+        _fs_tmpfs_tmp
     fi
+
+    # ── 1c. Compiler access restriction (Lynis HRDN-7222) ───────────────────
+    _fs_restrict_compilers
 
     # ── 1b. /boot mount options ──────────────────────────────────────────────
     if _fs_is_separate_mount /boot; then
@@ -538,6 +541,97 @@ EOF
     fi
 }
 
+# ─── tmpfs /tmp (Lynis FILE-6310) ────────────────────────────────────────────
+
+# _fs_tmpfs_tmp — when /tmp lives on the root filesystem, mount a tmpfs over
+# it so a full /tmp cannot fill / (and the nodev/nosuid/noexec options apply).
+_fs_tmpfs_tmp() {
+    if [[ "${ENABLE_TMPFS_TMP:-false}" != "true" ]]; then
+        log_info "filesystem_apply: /tmp is not a separate mount — set ENABLE_TMPFS_TMP=true to mount a tmpfs"
+        return 0
+    fi
+
+    local tmp_opts="mode=1777,strictatime,nodev,nosuid,size=50%"
+    if [[ "${NOEXEC_TMP:-true}" == "true" ]]; then
+        tmp_opts="${tmp_opts},noexec"
+    fi
+
+    if ! should_write; then
+        log_info "[DRY-RUN] Would add tmpfs /tmp (${tmp_opts}) to fstab and mount it"
+        return 0
+    fi
+
+    log_change \
+        "Mount /tmp as tmpfs (${tmp_opts})" \
+        "Separate /tmp so it cannot fill the root filesystem (Lynis FILE-6310)" \
+        "medium" \
+        "findmnt -no FSTYPE /tmp" \
+        "Restore /etc/fstab from backup; tmpfs disappears on reboot"
+
+    backup_file /etc/fstab
+    if ! awk '$2=="/tmp" && $1!~"^#"' /etc/fstab | grep -q .; then
+        printf 'tmpfs  /tmp  tmpfs  %s  0  0\n' "${tmp_opts}" >> /etc/fstab
+    fi
+
+    # Mounting over a live /tmp is safe: running services with PrivateTmp or
+    # open handles keep their namespace view; new processes get the tmpfs.
+    if mount /tmp 2>/dev/null || mount -t tmpfs -o "${tmp_opts}" tmpfs /tmp 2>/dev/null; then
+        log_success "filesystem_apply: /tmp is now a tmpfs mount"
+    else
+        log_warn "filesystem_apply: tmpfs /tmp configured — active after reboot"
+    fi
+    (( CHANGES_APPLIED++ )) || true
+
+    case "${DISTRO_FAMILY}" in
+        debian) debian_setup_tmp_hook || true ;;
+        rhel)   rhel_setup_tmp_hook   || true ;;
+    esac
+}
+
+# ─── Compiler Restriction (Lynis HRDN-7222) ──────────────────────────────────
+
+readonly -a _FS_COMPILERS=(
+    /usr/bin/gcc /usr/bin/g++ /usr/bin/cc /usr/bin/c++
+    /usr/bin/as /usr/bin/clang /usr/bin/clang++ /usr/bin/tcc
+)
+
+# _fs_restrict_compilers — remove world execute/read from compilers so only
+# root (and the owning group) can use them. Package upgrades may restore the
+# default modes; re-running the hardener reapplies the restriction.
+_fs_restrict_compilers() {
+    if [[ "${ENABLE_COMPILER_RESTRICT:-false}" != "true" ]]; then
+        log_debug "filesystem_apply: compiler restriction skipped (ENABLE_COMPILER_RESTRICT != true)"
+        return 0
+    fi
+
+    local bin restricted=0
+    for bin in "${_FS_COMPILERS[@]}"; do
+        [[ -e "${bin}" ]] || continue
+        local real mode
+        real="$(readlink -f "${bin}")"
+        mode="$(stat -c '%a' "${real}" 2>/dev/null)" || continue
+        # Skip if world bits already cleared
+        [[ "${mode: -1}" == "0" ]] && continue
+
+        if ! should_write; then
+            log_info "[DRY-RUN] Would chmod o-rwx ${real} (compiler restriction)"
+            continue
+        fi
+        chmod o-rwx "${real}" 2>/dev/null && (( restricted++ )) || true
+    done
+
+    if [[ ${restricted} -gt 0 ]]; then
+        log_change \
+            "Restricted world access on ${restricted} compiler binary/binaries" \
+            "Limit compiler use to root (Lynis HRDN-7222)" \
+            "low" \
+            "stat -c '%a' ${_FS_COMPILERS[*]} 2>/dev/null" \
+            "chmod 0755 on the affected binaries"
+        log_success "filesystem_apply: compiler access restricted (${restricted} binaries)"
+        (( CHANGES_APPLIED++ )) || true
+    fi
+}
+
 # ─── filesystem_rollback ──────────────────────────────────────────────────────
 
 filesystem_rollback() {
@@ -555,6 +649,18 @@ filesystem_rollback() {
     else
         log_warn "filesystem_rollback: no /etc/fstab backup found — skipping fstab restore"
     fi
+
+    # ── Restore compiler permissions ──────────────────────────────────────────
+    local bin
+    for bin in "${_FS_COMPILERS[@]}"; do
+        [[ -e "${bin}" ]] || continue
+        local real
+        real="$(readlink -f "${bin}")"
+        if [[ "$(stat -c '%a' "${real}" 2>/dev/null)" =~ 0$ ]]; then
+            chmod 0755 "${real}" 2>/dev/null \
+                && log_info "filesystem_rollback: restored 0755 on ${real}"
+        fi
+    done
 
     # ── Remove core dump drop-ins ─────────────────────────────────────────────
     if [[ -f "${_FS_LIMITS_CONF}" ]]; then

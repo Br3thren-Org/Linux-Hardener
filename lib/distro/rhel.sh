@@ -308,18 +308,28 @@ name=CISOfy Software - Lynis package
 baseurl=https://packages.cisofy.com/community/lynis/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://packages.cisofy.com/keys/cisofy-software-rpmsign-public.key
+gpgkey=https://packages.cisofy.com/keys/cisofy-software-public.key
 priority=2
 EOF
 )"
 
+            # || true: returns 2 when unchanged, which aborts set -e callers
             write_file_if_changed \
                 "/etc/yum.repos.d/cisofy-lynis.repo" \
                 "${repo_content}" \
-                "Add CISOfy Lynis yum repository"
+                "Add CISOfy Lynis yum repository" || true
 
-            pkg_install lynis
-            log_success "Lynis installed from CISOfy repository"
+            # RHEL 9 crypto-policies reject CISOfy's SHA-1 package signatures
+            # (GPG check FAILED) — fall back to the EPEL package in that case.
+            if pkg_install lynis 2>/dev/null; then
+                log_success "Lynis installed from CISOfy repository"
+            else
+                log_warn "CISOfy repo install failed (SHA-1 signature rejected on EL9) — falling back to EPEL"
+                rm -f /etc/yum.repos.d/cisofy-lynis.repo
+                dnf install -y epel-release 2>/dev/null || true
+                pkg_install lynis
+                log_success "Lynis installed via EPEL (CISOfy repo unavailable)"
+            fi
             ;;
 
         github)
