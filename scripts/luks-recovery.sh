@@ -134,7 +134,6 @@ cmd_regen_boot() {
         AUDIT_FINDINGS=0
         # shellcheck source=../lib/common.sh
         source "${PARENT_DIR}/lib/common.sh"
-        HARDENER_STATE_DIR_OVERRIDE=1
         # shellcheck source=../modules/luks.d/common.sh
         source "${PARENT_DIR}/modules/luks.d/common.sh"
         _luks_crypttab_check
