@@ -376,13 +376,17 @@ _luks_vps_swap() {
         printf '/dev/mapper/cryptswap  none  swap  sw,nofail  0  0\n' >> /etc/fstab
     fi
 
-    # 4. Activate now without rebooting
-    if command -v systemd-cryptsetup &>/dev/null; then
-        systemctl daemon-reload
-        systemctl start systemd-cryptsetup@cryptswap.service 2>/dev/null \
-            && swapon /dev/mapper/cryptswap 2>/dev/null \
-            && log_success "luks: encrypted swap active on /dev/mapper/cryptswap" \
-            || log_warn "luks: encrypted swap configured — will activate on next boot"
+    # 4. Activate now without rebooting. The generator-created unit exists on
+    #    every systemd distro (the systemd-cryptsetup binary itself lives
+    #    outside PATH on Debian/RHEL, so do not gate on command -v).
+    #    restart (not start): a stale "active (exited)" instance from a prior
+    #    boot makes start a silent no-op.
+    systemctl daemon-reload
+    if systemctl restart systemd-cryptsetup@cryptswap.service 2>/dev/null \
+            && swapon /dev/mapper/cryptswap 2>/dev/null; then
+        log_success "luks: encrypted swap active on /dev/mapper/cryptswap"
+    else
+        log_warn "luks: encrypted swap configured — will activate on next boot"
     fi
 
     _luks_state_record "cryptswap" "${swap_src}"

@@ -18,7 +18,10 @@ readonly LUKS_CRYPTTAB="/etc/crypttab"
 _luks_state_record() {
     mkdir -p "$(dirname "${LUKS_STATE_FILE}")"
     local IFS='|'
-    printf '%s\n' "$*" >> "${LUKS_STATE_FILE}"
+    local line="$*"
+    # Idempotent: re-applies must not duplicate records
+    grep -qsxF "${line}" "${LUKS_STATE_FILE}" 2>/dev/null && return 0
+    printf '%s\n' "${line}" >> "${LUKS_STATE_FILE}"
 }
 
 # _luks_state_entries <kind> — print recorded entries of one kind

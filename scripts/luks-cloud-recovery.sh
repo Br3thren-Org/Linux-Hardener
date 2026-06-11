@@ -178,7 +178,11 @@ cmd_status() {
                 ;;
             cryptswap)
                 local state="inactive"
-                swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/mapper/cryptswap' && state="active"
+                # swapon reports the resolved /dev/dm-N node — compare real paths
+                if [[ -e /dev/mapper/cryptswap ]] && swapon --show=NAME --noheadings 2>/dev/null \
+                        | grep -qx "$(readlink -f /dev/mapper/cryptswap)"; then
+                    state="active"
+                fi
                 printf '%-12s %-12s %-35s %s\n' "swap" "cryptswap" "${name}" "${state}"
                 ;;
         esac

@@ -237,10 +237,16 @@ luks_apply() {
 luks_rollback() {
     log_info "luks_rollback: reverting LUKS module configuration"
 
-    restore_file "${LUKS_CRYPTTAB}" 2>/dev/null \
-        || log_debug "luks_rollback: no crypttab backup to restore"
-    restore_file /etc/fstab 2>/dev/null \
-        || log_debug "luks_rollback: no fstab backup to restore"
+    # Only restore files this run's backup actually contains — a re-apply that
+    # changed nothing has no crypttab/fstab backup, which is not an error.
+    local f
+    for f in "${LUKS_CRYPTTAB}" /etc/fstab; do
+        if [[ -n "${BACKUP_DIR:-}" && -e "${BACKUP_DIR}${f}" ]]; then
+            restore_file "${f}"
+        else
+            log_debug "luks_rollback: no backup of ${f} in this run — leaving as-is"
+        fi
+    done
 
     # Disable the loop-container unit and unmount what we created
     if [[ -f /etc/systemd/system/luks-data.service ]]; then
@@ -259,12 +265,18 @@ luks_rollback() {
         fi
     done < <(_luks_state_entries "bind")
 
-    # Deactivate encrypted swap; restored fstab re-enables original swap
-    if swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/mapper/cryptswap'; then
+    # Deactivate encrypted swap; restored fstab re-enables original swap.
+    # swapon reports the resolved /dev/dm-N node, so compare real paths.
+    if [[ -e /dev/mapper/cryptswap ]] && swapon --show=NAME --noheadings 2>/dev/null \
+            | grep -qx "$(readlink -f /dev/mapper/cryptswap)"; then
         swapoff /dev/mapper/cryptswap 2>/dev/null || true
+    fi
+    if cryptsetup status cryptswap &>/dev/null; then
         cryptsetup close cryptswap 2>/dev/null || true
         log_info "luks_rollback: encrypted swap deactivated"
     fi
+    # Clear any lingering generator unit instance so a later re-apply starts fresh
+    systemctl stop systemd-cryptsetup@cryptswap.service 2>/dev/null || true
     # Un-comment swap entries we disabled
     if [[ -f /etc/fstab ]] && grep -q '^#disabled-by-linux-hardener ' /etc/fstab; then
         sed -i 's@^#disabled-by-linux-hardener @@' /etc/fstab

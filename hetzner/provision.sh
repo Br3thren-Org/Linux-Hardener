@@ -20,7 +20,7 @@ HETZNER_IMAGES="${HETZNER_IMAGES:-debian-12}"
 
 # ─── Build ID ─────────────────────────────────────────────────────────────────
 
-BUILD_ID="$(date +%Y%m%d-%H%M%S)-$(head -c4 /dev/urandom | xxd -p)"
+BUILD_ID="$(date +%Y%m%d-%H%M%S)-$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')"
 readonly BUILD_ID
 
 # ─── Prerequisites ────────────────────────────────────────────────────────────
