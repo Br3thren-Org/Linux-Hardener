@@ -20,6 +20,9 @@ Modes:
 Options:
   --config PATH     Path to config file (default: ${SCRIPT_DIR}/config/hardener.conf)
   --modules LIST    Comma-separated list of modules to run (default: all)
+  --luks-mode MODE  LUKS deployment strategy: auto | bare-metal | virtual
+                    (default: auto — detect the environment at runtime)
+  --luks-only       Run only the LUKS encryption module
   --verbose         Enable verbose/debug output
   --help, -h        Show this help message
 
@@ -34,6 +37,7 @@ Modules (execution order):
   logging     Configure system logging and audit rules
   integrity   Deploy file-integrity monitoring (AIDE)
   systemd_hardening  Apply security sandboxing to systemd services
+  luks        At-rest encryption (optional; LUKS_ENABLED=yes in config/luks.conf)
 
 Examples:
   sudo $(basename "${0}") --audit
@@ -54,6 +58,7 @@ parse_args() {
     CONFIG_FILE="${config_default}"
     MODULE_FILTER=""
     VERBOSE="false"
+    LUKS_MODE_OVERRIDE=""
 
     if [[ $# -eq 0 ]]; then
         usage
@@ -94,6 +99,24 @@ parse_args() {
                 MODULE_FILTER="${2}"
                 shift 2
                 ;;
+            --luks-mode)
+                if [[ $# -lt 2 ]]; then
+                    printf 'ERROR: --luks-mode requires a MODE argument (auto|bare-metal|virtual)\n' >&2
+                    exit 1
+                fi
+                case "${2}" in
+                    auto|bare-metal|virtual) LUKS_MODE_OVERRIDE="${2}" ;;
+                    *)
+                        printf 'ERROR: invalid --luks-mode: %s (use auto|bare-metal|virtual)\n' "${2}" >&2
+                        exit 1
+                        ;;
+                esac
+                shift 2
+                ;;
+            --luks-only)
+                MODULE_FILTER="luks"
+                shift
+                ;;
             --verbose)
                 VERBOSE="true"
                 shift
@@ -116,7 +139,7 @@ parse_args() {
         exit 1
     fi
 
-    export RUN_MODE CONFIG_FILE MODULE_FILTER VERBOSE
+    export RUN_MODE CONFIG_FILE MODULE_FILTER VERBOSE LUKS_MODE_OVERRIDE
 }
 
 # ─── Root Check ───────────────────────────────────────────────────────────────
@@ -194,6 +217,7 @@ readonly MODULES=(
     logging
     integrity
     systemd_hardening
+    luks
 )
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -208,6 +232,19 @@ main() {
 
     log_init
     load_config "${CONFIG_FILE}"
+
+    # LUKS module config: config/luks.conf wins over LUKS_* values in the main
+    # config; the --luks-mode CLI flag wins over both.
+    if [[ -f "${SCRIPT_DIR}/config/luks.conf" ]]; then
+        # shellcheck source=config/luks.conf
+        source "${SCRIPT_DIR}/config/luks.conf"
+        log_info "LUKS config loaded from: ${SCRIPT_DIR}/config/luks.conf"
+    fi
+    if [[ -n "${LUKS_MODE_OVERRIDE:-}" ]]; then
+        LUKS_MODE="${LUKS_MODE_OVERRIDE}"
+        log_info "LUKS mode overridden via CLI: ${LUKS_MODE}"
+    fi
+
     detect_distro
 
     # Source distro-specific adapter
@@ -230,6 +267,10 @@ main() {
     local module
     for module in "${MODULES[@]}"; do
         local module_file="${SCRIPT_DIR}/lib/${module}.sh"
+        # Optional feature modules live under modules/ with a numeric prefix
+        if [[ "${module}" == "luks" ]]; then
+            module_file="${SCRIPT_DIR}/modules/20_luks.sh"
+        fi
         if [[ -f "${module_file}" ]]; then
             # shellcheck source=/dev/null
             source "${module_file}"
