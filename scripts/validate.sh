@@ -229,6 +229,48 @@ run_checks() {
         "sysctl -n fs.suid_dumpable 2>/dev/null" \
         "0"
 
+    # ── Encryption (LUKS) ─────────────────────────────────────────────────────
+    # Only enforced when the optional LUKS module is enabled in config/luks.conf.
+
+    local luks_enabled="no"
+    if [[ -f "${PARENT_DIR}/config/luks.conf" ]]; then
+        luks_enabled="$(awk -F= '/^LUKS_ENABLED=/{gsub(/["'\'' ]/,"",$2); print $2}' \
+            "${PARENT_DIR}/config/luks.conf" | tail -1)"
+    fi
+
+    if [[ "${luks_enabled}" == "yes" ]]; then
+        section "Encryption (LUKS)"
+
+        check "/etc/crypttab present" \
+            "test -f /etc/crypttab" \
+            ""
+
+        # Re-use the module's own validator for structural checks
+        check "/etc/crypttab valid" \
+            "AUDIT_FINDINGS=0; source '${PARENT_DIR}/modules/luks.d/common.sh' 2>/dev/null; _luks_crypttab_check" \
+            ""
+
+        # All active swap must be dm-crypt backed (or zram)
+        check "Swap encrypted" \
+            "swaps=\$(swapon --show=NAME --noheadings 2>/dev/null); [[ -z \"\${swaps}\" ]] || ! grep -v '^/dev/\(mapper/\|dm-\|zram\)' <<< \"\${swaps}\" | grep -q . && echo ok" \
+            "ok"
+
+        # Environment-specific expectation: bare-metal needs an encrypted
+        # root; a VPS needs at least one non-root LUKS volume.
+        if systemd-detect-virt --quiet 2>/dev/null; then
+            check "Non-root LUKS volume" \
+                "lsblk -rno TYPE 2>/dev/null | grep -c '^crypt\$'" \
+                "[1-9]"
+        else
+            check "Root device encrypted" \
+                "lsblk -sno TYPE \"\$(findmnt -no SOURCE / | sed 's/\[.*//')\" 2>/dev/null | grep -w crypt && echo ok" \
+                "ok"
+        fi
+    else
+        section "Encryption (LUKS)"
+        printf '  %-30s SKIP  (LUKS_ENABLED=no in config/luks.conf)\n' "LUKS module"
+    fi
+
     # ── Critical Services ─────────────────────────────────────────────────────
 
     section "Critical Services"
