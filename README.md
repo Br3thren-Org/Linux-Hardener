@@ -1,6 +1,6 @@
 # Linux Hardener
 
-A modular Linux hardening framework that achieves **85–89 Lynis hardening index** on fresh cloud instances, with automated Hetzner Cloud test orchestration and remote deployment to any SSH-accessible machine.
+A modular Linux hardening framework that achieves **up to 89 Lynis hardening index with zero Lynis warnings** on fresh cloud instances, with automated Hetzner Cloud test orchestration and remote deployment to any SSH-accessible machine.
 
 Production-safe, auditable, reversible, distro-aware. Every change includes a reason, risk note, validation step, and rollback path.
 
@@ -8,16 +8,17 @@ Production-safe, auditable, reversible, distro-aware. Every change includes a re
 
 | Distro | Before | After | Delta | Validation |
 |---|---|---|---|---|
-| Debian 12 (Bookworm) | 64 | **88** | +24 | 19/19 PASS |
-| Debian 13 (Trixie) | 67 | **89** | +22 | 19/19 PASS |
-| Ubuntu 24.04 | 60 | **82** | +22 | 19/19 PASS |
-| Fedora 43 | 65 | **88** | +23 | 18/19 PASS |
-| Rocky Linux 9 | 66 | **85** | +19 | 19/19 PASS |
-| Rocky Linux 10 | 66 | **85** | +19 | 19/19 PASS |
-| AlmaLinux 9 | 66 | **85** | +19 | 19/19 PASS |
-| AlmaLinux 10 | 66 | **85** | +19 | 19/19 PASS |
+| Debian 12 (Bookworm) ² | 61 | **89** | +28 | all PASS, 0 warnings |
+| Rocky Linux 9 ² | 66 ¹ | **88** | +22 | all PASS, 0 warnings |
+| Debian 13 (Trixie) ¹ | 67 | **89** | +22 | 19/19 PASS |
+| Ubuntu 24.04 ¹ | 60 | **82** | +22 | 19/19 PASS |
+| Fedora 43 ¹ | 65 | **88** | +23 | 18/19 PASS |
+| Rocky Linux 10 ¹ | 66 | **85** | +19 | 19/19 PASS |
+| AlmaLinux 9 ¹ | 66 | **85** | +19 | 19/19 PASS |
+| AlmaLinux 10 ¹ | 66 | **85** | +19 | 19/19 PASS |
 
-*Tested on Hetzner CX33 (4 vCPU, 8 GB RAM) — 2026-03-31*
+*¹ Hetzner CX33, Lynis 3.0.9 (distro package) — 2026-03-31.*
+*² Hetzner CPX22, current Lynis 3.1.6, full apply + reboot — 2026-06-12. Includes the GRUB password, tmpfs /tmp, compiler restriction, AIDE SHA-512, and nftables fail2ban improvements; every remaining Lynis suggestion is an operator/infrastructure choice (separate /home and /var partitions, non-default SSH port, remote syslog, automation tooling).*
 
 ## Supported Platforms
 
@@ -206,7 +207,7 @@ Set via `HARDENING_PROFILE` in config. Individual settings always override the p
 
 ## What Gets Hardened
 
-### 37+ changes applied across 9 modules:
+### 57+ changes applied across 11 modules:
 
 **Packages** — Security updates, remove unnecessary packages (telnet, rsh, xinetd, etc.), install security tools (libpam-tmpdir, needrestart, debsums, rkhunter, acct, sysstat), enable unattended security upgrades, restrict compiler access.
 
