@@ -125,7 +125,7 @@ Multi-disk servers support RAID via mdadm:
 
 Supported levels: `raid0`, `raid1`, `raid5`, `raid6`, `raid10`.
 
-See `docs/superpowers/specs/2026-03-31-luks-encrypted-provisioning-design.md` for full documentation.
+See `docs/LUKS.md` for how the provisioning system relates to the runtime encryption module below.
 
 ## LUKS Runtime Encryption (Existing Hosts)
 
