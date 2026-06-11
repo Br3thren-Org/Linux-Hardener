@@ -5,7 +5,12 @@
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-readonly SYSCTL_DROPIN="/etc/sysctl.d/99-hardening.conf"
+# zz- prefix: sysctl applies drop-ins in lexicographic order across /etc and
+# /usr/lib, and vendor files like Debian's 99-protect-links.conf (which resets
+# fs.protected_fifos to 1) sort after "99-hardening" and would override us —
+# both at apply time and on every boot.
+readonly SYSCTL_DROPIN="/etc/sysctl.d/zz-hardening.conf"
+readonly SYSCTL_DROPIN_LEGACY="/etc/sysctl.d/99-hardening.conf"
 
 # ─── Static Settings ─────────────────────────────────────────────────────────
 
@@ -193,6 +198,12 @@ sysctl_apply() {
     # Ensure parent directory exists
     mkdir -p "$(dirname "${SYSCTL_DROPIN}")"
 
+    # Migrate installs that used the old 99- name (superseded by zz-)
+    if [[ -f "${SYSCTL_DROPIN_LEGACY}" ]]; then
+        rm -f "${SYSCTL_DROPIN_LEGACY}"
+        log_info "sysctl_apply: removed legacy drop-in ${SYSCTL_DROPIN_LEGACY}"
+    fi
+
     # Write (only if content changed)
     local write_rc=0
     write_file_if_changed "${SYSCTL_DROPIN}" "${content}" "sysctl hardening drop-in" || write_rc=$?
@@ -251,10 +262,15 @@ sysctl_apply() {
 sysctl_rollback() {
     log_info "sysctl_rollback: removing hardening drop-in and reloading sysctl"
 
-    if [[ -f "${SYSCTL_DROPIN}" ]]; then
-        rm -f "${SYSCTL_DROPIN}"
-        log_info "sysctl_rollback: removed ${SYSCTL_DROPIN}"
-    else
+    local dropin removed=false
+    for dropin in "${SYSCTL_DROPIN}" "${SYSCTL_DROPIN_LEGACY}"; do
+        if [[ -f "${dropin}" ]]; then
+            rm -f "${dropin}"
+            log_info "sysctl_rollback: removed ${dropin}"
+            removed=true
+        fi
+    done
+    if [[ "${removed}" == "false" ]]; then
         log_debug "sysctl_rollback: drop-in not present, nothing to remove"
     fi
 

@@ -331,10 +331,14 @@ should_run_module() {
 
 # ─── Package Manager Abstraction ─────────────────────────────────────────────
 
+# APT_LISTBUGS_FRONTEND/APT_LISTCHANGES_FRONTEND=none: the hardener installs
+# apt-listbugs itself, and its hook aborts unattended installs (exit 10) when
+# the target package has open bugs — it must not block our own operations.
 pkg_install() {
     case "${DISTRO_FAMILY}" in
         debian)
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+            DEBIAN_FRONTEND=noninteractive APT_LISTBUGS_FRONTEND=none APT_LISTCHANGES_FRONTEND=none \
+                apt-get install -y "$@" ;;
         rhel)
             dnf install -y "$@" ;;
         *)
@@ -346,7 +350,8 @@ pkg_install() {
 pkg_remove() {
     case "${DISTRO_FAMILY}" in
         debian)
-            apt-get purge -y "$@" ;;
+            DEBIAN_FRONTEND=noninteractive APT_LISTBUGS_FRONTEND=none APT_LISTCHANGES_FRONTEND=none \
+                apt-get purge -y "$@" ;;
         rhel)
             dnf remove -y "$@" ;;
         *)
@@ -371,7 +376,8 @@ pkg_is_installed() {
 pkg_update() {
     case "${DISTRO_FAMILY}" in
         debian)
-            apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y ;;
+            apt-get update && DEBIAN_FRONTEND=noninteractive APT_LISTBUGS_FRONTEND=none APT_LISTCHANGES_FRONTEND=none \
+                apt-get upgrade -y ;;
         rhel)
             dnf update --security -y ;;
         *)
@@ -387,7 +393,12 @@ svc_is_enabled() { systemctl is-enabled --quiet "${1}"; }
 
 svc_exists() {
     local name="${1}"
-    systemctl list-unit-files "${name}.service" 2>/dev/null | grep -q "${name}.service"
+    # Capture before grepping: piping systemctl straight into grep -q is racy
+    # under pipefail — grep exits at first match and systemctl's SIGPIPE (141)
+    # randomly fails the pipeline.
+    local out
+    out="$(systemctl list-unit-files "${name}.service" 2>/dev/null)"
+    grep -q "${name}\.service" <<< "${out}"
 }
 
 svc_disable() {

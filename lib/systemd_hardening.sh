@@ -41,24 +41,19 @@ _sysharden_override_for() {
 
     case "${service}" in
         ssh|sshd)
-            # Use ProtectSystem=full (not strict) because sshd needs /var/run write access
+            # SESSION-SAFE PROFILE ONLY. Login sessions are forked children of
+            # sshd and inherit its mount namespace and seccomp filters even
+            # though pam_systemd moves them to a session scope. Mount-level
+            # sandboxing (ProtectSystem/ProtectHome/ProtectKernelTunables/
+            # PrivateTmp/ProtectControlGroups) therefore applies to every
+            # admin session: root would see a read-only /etc, /root and
+            # /proc/sys, breaking sysctl, apt, scp and most administration.
             cat <<'EOF'
 [Service]
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=yes
 NoNewPrivileges=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=no
 LockPersonality=yes
 SystemCallArchitectures=native
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 EOF
             ;;
         cron)
@@ -98,7 +93,11 @@ LockPersonality=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_AUDIT_READ
-ReadWritePaths=/var/run/fail2ban /var/lib/fail2ban /var/log
+# RuntimeDirectory: under ProtectSystem=strict /run is read-only, and the
+# stock unit expects fail2ban-server to mkdir /run/fail2ban itself — systemd
+# must pre-create it (and implicitly whitelist it) or the daemon dies at start.
+RuntimeDirectory=fail2ban
+ReadWritePaths=/var/lib/fail2ban /var/log
 EOF
             ;;
         unattended-upgrades)
@@ -344,18 +343,13 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK
 EOF
             ;;
         getty@*|serial-getty@*)
+            # SESSION-SAFE PROFILE ONLY (same reasoning as ssh): console login
+            # sessions inherit getty's namespaces. A sandboxed console is
+            # catastrophic during recovery — ProtectHome=yes would even hide
+            # /root from the emergency login.
             cat <<'EOF'
 [Service]
-ProtectSystem=full
-ProtectHome=yes
-PrivateTmp=yes
 NoNewPrivileges=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
 RestrictRealtime=yes
 LockPersonality=yes
 SystemCallArchitectures=native
@@ -400,7 +394,8 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
+# No MemoryDenyWriteExecute: RHEL-family polkitd embeds the mozjs JS engine
+# whose JIT needs W+X memory — the daemon dies by signal at startup with it.
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 EOF
@@ -533,7 +528,10 @@ _sysharden_svc_exists() {
     # For template instances like getty@tty1, check the template unit
     if [[ "${name}" == *@* ]]; then
         local template="${name%%@*}@"
-        systemctl list-unit-files "${template}.service" 2>/dev/null | grep -q "${template}.service"
+        # Capture before grepping (see svc_exists: grep -q + pipefail race)
+        local out
+        out="$(systemctl list-unit-files "${template}.service" 2>/dev/null)"
+        grep -q "${template}\.service" <<< "${out}"
     else
         svc_exists "${name}"
     fi

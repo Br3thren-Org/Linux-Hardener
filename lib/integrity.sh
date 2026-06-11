@@ -64,18 +64,45 @@ integrity_apply() {
     fi
 }
 
+# _integrity_clear_listbugs_pin — a previously aborted install can leave an
+# apt-listbugs pin (Pin-Priority: -30000) that makes fail2ban's candidate
+# "(none)" forever. The pinned bugs (#1037437, #770171) concern the sshd jail
+# needing rsyslog — irrelevant here because our jail uses backend=systemd.
+_integrity_clear_listbugs_pin() {
+    local pin_file="/etc/apt/preferences.d/apt-listbugs"
+    [[ -f "${pin_file}" ]] || return 0
+    grep -q '^Package: fail2ban$' "${pin_file}" || return 0
+
+    backup_file "${pin_file}"
+    # Drop the fail2ban stanza (RFC822-style paragraph incl. leading comments)
+    awk -v RS= -v ORS='\n\n' '!/^Package: fail2ban$/ && !/\nPackage: fail2ban\n/' \
+        "${pin_file}" > "${pin_file}.tmp"
+    if grep -q '[^[:space:]]' "${pin_file}.tmp"; then
+        mv "${pin_file}.tmp" "${pin_file}"
+    else
+        rm -f "${pin_file}.tmp" "${pin_file}"
+    fi
+    log_info "integrity_apply: removed apt-listbugs pin blocking fail2ban installation"
+}
+
 _integrity_apply_fail2ban() {
     log_info "integrity_apply: configuring fail2ban"
 
     # Install fail2ban if not present
     if ! command -v fail2ban-server &>/dev/null; then
+        if should_write && [[ "${DISTRO_FAMILY:-}" == "debian" ]]; then
+            _integrity_clear_listbugs_pin
+        fi
         log_info "integrity_apply: fail2ban not installed, installing now"
         if should_write; then
             # RHEL-family needs EPEL for fail2ban; Fedora has it in main repos
             if [[ "${DISTRO_FAMILY:-}" == "rhel" && "${DISTRO_ID:-}" != "fedora" ]]; then
                 dnf install -y epel-release 2>/dev/null || true
             fi
-            pkg_install fail2ban || {
+            # python3-systemd is only a Recommends of fail2ban and many cloud
+            # images disable Install-Recommends — without it the jail's
+            # systemd backend dies with "No module named 'systemd'".
+            pkg_install fail2ban python3-systemd || {
                 log_error "integrity_apply: failed to install fail2ban"
                 (( CHANGES_FAILED++ )) || true
                 return 1
@@ -100,7 +127,9 @@ maxretry = ${FAIL2BAN_MAXRETRY:-5}
 bantime = ${FAIL2BAN_BANTIME:-600}
 findtime = 600
 backend = systemd
-logpath = %(sshd_log)s
+# No logpath: with backend=systemd the jail reads the journal directly.
+# Setting logpath forces file-based discovery and aborts the server on
+# journald-only hosts (no /var/log/auth.log without rsyslog — Debian #770171).
 EOF
 )"
 
@@ -122,10 +151,28 @@ EOF
             return 1
         fi
 
-        # DEB-0880: copy jail.conf to jail.local to prevent update overwriting
-        if [[ -f /etc/fail2ban/jail.conf ]] && [[ ! -f /etc/fail2ban/jail.local ]]; then
-            cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
-            log_info "integrity_apply: copied jail.conf to jail.local for update protection (Lynis DEB-0880)"
+        # DEB-0880 (config survives package updates): use a minimal stub, NOT a
+        # copy of jail.conf — fail2ban reads jail.local AFTER jail.d/*.conf, so
+        # a full copy re-overrides every jail.d setting with stock defaults
+        # (e.g. resets the sshd jail to the file backend, killing the server on
+        # journald-only hosts). Repair existing unmodified copies in place.
+        local jail_local="/etc/fail2ban/jail.local"
+        local stub_needed=false
+        if [[ ! -f "${jail_local}" ]]; then
+            stub_needed=true
+        elif [[ -f /etc/fail2ban/jail.conf ]] && cmp -s /etc/fail2ban/jail.conf "${jail_local}"; then
+            # Unmodified copy made by older hardener versions — safe to replace
+            backup_file "${jail_local}"
+            stub_needed=true
+            log_info "integrity_apply: replacing jail.conf copy at ${jail_local} (it overrode jail.d settings)"
+        fi
+        if [[ "${stub_needed}" == "true" ]]; then
+            cat > "${jail_local}" <<'EOF'
+# Managed by linux-hardener (Lynis DEB-0880) — do not edit by hand.
+# Local configuration lives in /etc/fail2ban/jail.d/99-hardening.conf.
+# NOTE: fail2ban reads jail.local after jail.d/*.conf — keep this file empty
+# of jail definitions or it will override them.
+EOF
         fi
 
         # Enable and restart fail2ban
@@ -137,6 +184,15 @@ EOF
             (( CHANGES_FAILED++ )) || true
             return 1
         }
+
+        # fail2ban-server parses jails asynchronously after the unit reports
+        # started — a broken jail kills the daemon a moment later, so verify.
+        sleep 3
+        if ! svc_is_active fail2ban; then
+            log_error "integrity_apply: fail2ban died after restart — check 'journalctl -u fail2ban'"
+            (( CHANGES_FAILED++ )) || true
+            return 1
+        fi
 
         log_change \
             "fail2ban jail config written: ${FAIL2BAN_JAIL_CONF}" \

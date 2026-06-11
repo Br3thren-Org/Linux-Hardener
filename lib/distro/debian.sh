@@ -22,7 +22,9 @@ debian_security_update() {
         "N/A — package updates cannot be automatically reversed"
 
     DEBIAN_FRONTEND=noninteractive apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+    # listbugs/listchanges hooks must not abort unattended upgrades (exit 10)
+    DEBIAN_FRONTEND=noninteractive APT_LISTBUGS_FRONTEND=none APT_LISTCHANGES_FRONTEND=none \
+        apt-get upgrade -y
     log_success "Debian security update complete"
 }
 
