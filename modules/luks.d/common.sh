@@ -343,6 +343,7 @@ readonly _LUKS_CRYPTTAB_OPT_RE='^(luks|plain|swap|tmp|discard|noauto|nofail|read
 _luks_crypttab_check() {
     local file="${1:-${LUKS_CRYPTTAB}}"
     [[ -f "${file}" ]] || { log_debug "luks: ${file} does not exist"; return 0; }
+    [[ -r "${file}" ]] || { log_warn "luks: ${file} not readable (need root) — validation skipped"; return 0; }
 
     local rc=0 lineno=0
     local name src key opts extra
