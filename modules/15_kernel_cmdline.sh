@@ -33,7 +33,9 @@ readonly -a _KCMD_BASE_PARAMS=(
 
 # ─── Parameter Selection ──────────────────────────────────────────────────────
 
-# _kcmd_wanted_params — print the full parameter list for this host, one per line
+# _kcmd_wanted_params — print the full parameter list for this host, one per
+# line. ONLY parameters go to stdout (the caller captures it); any logging is
+# redirected to stderr so it never pollutes the captured parameter list.
 _kcmd_wanted_params() {
     local p
     for p in "${_KCMD_BASE_PARAMS[@]}"; do
@@ -50,10 +52,10 @@ _kcmd_wanted_params() {
         if [[ "${LUKS_ENV_SECUREBOOT:-}" == "enabled" ]]; then
             printf 'lockdown=integrity\n'
         else
-            log_warn "kernel_cmdline: Secure Boot is not enabled — skipping lockdown=integrity (no enforcement benefit, real breakage risk)"
+            log_warn "kernel_cmdline: Secure Boot is not enabled — skipping lockdown=integrity (no enforcement benefit, real breakage risk)" >&2
         fi
     else
-        log_debug "kernel_cmdline: kernel has no lockdown LSM — skipping lockdown=integrity"
+        log_debug "kernel_cmdline: kernel has no lockdown LSM — skipping lockdown=integrity" >&2
     fi
 
     # Operator extras
