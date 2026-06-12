@@ -230,6 +230,21 @@ run_checks() {
         check "Crypto drop-in present" \
             "test -f /etc/ssh/sshd_config.d/25-hardener-crypto.conf" \
             ""
+
+        # System-wide crypto policy: only enforced on RHEL when explicitly
+        # opted in (SSH_CRYPTO_SYSTEM_POLICY=yes). Otherwise informational —
+        # the sshd drop-in above is the real SSH hardening mechanism.
+        if [[ "${DISTRO_FAMILY}" == "rhel" ]] && command -v update-crypto-policies &>/dev/null; then
+            if [[ "$(_conf_val SSH_CRYPTO_SYSTEM_POLICY no)" == "yes" ]]; then
+                check "System crypto policy FUTURE" \
+                    "update-crypto-policies --show 2>/dev/null" \
+                    "FUTURE"
+            else
+                printf '  %-30s SKIP  (SSH_CRYPTO_SYSTEM_POLICY=no; policy: %s)\n' \
+                    "System crypto policy" \
+                    "$(update-crypto-policies --show 2>/dev/null || echo unknown)"
+            fi
+        fi
     fi
 
     # ── Kernel command line ───────────────────────────────────────────────────
