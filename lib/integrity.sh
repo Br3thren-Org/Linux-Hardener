@@ -332,6 +332,28 @@ _integrity_apply_aide() {
         aide_conf_path="/etc/aide.conf"
     fi
 
+    # The daily checks below depend on a cron daemon, which minimal cloud
+    # images (e.g. Fedora) do not ship — install and enable it if missing.
+    if ! command -v crond &>/dev/null && ! command -v cron &>/dev/null; then
+        if should_write; then
+            local cron_pkg="cron" cron_svc="cron"
+            if [[ "${DISTRO_FAMILY:-}" == "rhel" ]]; then
+                cron_pkg="cronie"
+                cron_svc="crond"
+            fi
+            log_info "integrity_apply: no cron daemon found — installing ${cron_pkg}"
+            if pkg_install "${cron_pkg}"; then
+                systemctl enable --now "${cron_svc}" 2>/dev/null \
+                    || log_warn "integrity_apply: could not start ${cron_svc}"
+                (( CHANGES_APPLIED++ )) || true
+            else
+                log_warn "integrity_apply: failed to install ${cron_pkg} — daily checks will not run"
+            fi
+        else
+            log_info "[DRY-RUN] Would install and enable a cron daemon (required for daily checks)"
+        fi
+    fi
+
     # Write daily cron job
     local cron_content
     cron_content="$(cat <<EOF

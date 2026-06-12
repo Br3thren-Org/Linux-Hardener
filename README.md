@@ -1,24 +1,34 @@
 # Linux Hardener
 
-A modular Linux hardening framework that achieves **up to 89 Lynis hardening index with zero Lynis warnings** on fresh cloud instances, with automated Hetzner Cloud test orchestration and remote deployment to any SSH-accessible machine.
+A modular Linux hardening framework that achieves **up to 90 Lynis hardening index** on fresh cloud instances, with automated Hetzner Cloud test orchestration and remote deployment to any SSH-accessible machine.
 
 Production-safe, auditable, reversible, distro-aware. Every change includes a reason, risk note, validation step, and rollback path.
 
 ## Tested Results
 
-| Distro | Before | After | Delta | Validation |
-|---|---|---|---|---|
-| Debian 12 (Bookworm) ² | 61 | **89** | +28 | all PASS, 0 warnings |
-| Rocky Linux 9 ² | 66 ¹ | **88** | +22 | all PASS, 0 warnings |
-| Debian 13 (Trixie) ¹ | 67 | **89** | +22 | 19/19 PASS |
-| Ubuntu 24.04 ¹ | 60 | **82** | +22 | 19/19 PASS |
-| Fedora 43 ¹ | 65 | **88** | +23 | 18/19 PASS |
-| Rocky Linux 10 ¹ | 66 | **85** | +19 | 19/19 PASS |
-| AlmaLinux 9 ¹ | 66 | **85** | +19 | 19/19 PASS |
-| AlmaLinux 10 ¹ | 66 | **85** | +19 | 19/19 PASS |
+All rows measured 2026-06-12 with current **Lynis 3.1.6** on fresh Hetzner CPX22
+instances after a full `harden.sh --apply`.
 
-*¹ Hetzner CX33, Lynis 3.0.9 (distro package) — 2026-03-31.*
-*² Hetzner CPX22, current Lynis 3.1.6, full apply + reboot — 2026-06-12. Includes the GRUB password, tmpfs /tmp, compiler restriction, AIDE SHA-512, and nftables fail2ban improvements; every remaining Lynis suggestion is an operator/infrastructure choice (separate /home and /var partitions, non-default SSH port, remote syslog, automation tooling).*
+| Distro | Before | After | Delta |
+|---|---|---|---|
+| Debian 13 (Trixie) | 67 | **90** | +23 |
+| Debian 12 (Bookworm) ¹ | 61 | **89** | +28 |
+| Rocky Linux 9 ¹ | 66 | **88** | +22 |
+| Fedora 43 | 65 | **88** | +23 |
+| Rocky Linux 10 | 66 | **86** | +20 |
+| AlmaLinux 9 | 66 | **86** | +20 |
+| AlmaLinux 10 | 67 | **86** | +19 |
+| Ubuntu 24.04 ² | 60 | **83** | +23 |
+
+*¹ Audited after a reboot, which clears the transient "reboot needed" /
+"stale iptables modules" warnings — the orchestrated rows above were audited
+without rebooting and typically gain 1–2 more points after one.*
+*² Ubuntu is penalized by Lynis for phased apt updates ("vulnerable packages")
+and for not recognizing deb822 security sources — both cosmetic.*
+
+Every remaining Lynis suggestion is an operator/infrastructure choice
+(separate `/home` and `/var` partitions, non-default SSH port, remote syslog,
+automation tooling, opt-in `ENABLE_MODULES_DISABLED`).
 
 ## Supported Platforms
 
