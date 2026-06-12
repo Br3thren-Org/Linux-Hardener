@@ -38,6 +38,11 @@ SSH_ALLOW_AGENT_FORWARDING="no"
 SSH_MODERN_CRYPTO="yes"
 SSH_ALLOWED_GROUPS=""
 SSH_LOGIN_GRACE_TIME=20
+# SSH_CRYPTO_SYSTEM_POLICY: on RHEL, also raise the SYSTEM-WIDE crypto policy
+#   to FUTURE. OFF by default — FUTURE rejects "too weak" TLS certs presented
+#   by some package mirrors (e.g. mirrors.rockylinux.org) and breaks dnf
+#   downloads. The sshd drop-in already enforces modern SSH crypto without it.
+SSH_CRYPTO_SYSTEM_POLICY="no"
 
 # -----------------------------------------------------------------------------
 # Firewall

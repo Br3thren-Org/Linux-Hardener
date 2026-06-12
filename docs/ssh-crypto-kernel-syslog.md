@@ -15,18 +15,25 @@ firewall (`lib/firewall.sh`, nftables) modules.
 
 ## 1. SSH Crypto Policy (`modules/25_ssh_crypto.sh`)
 
-Writes `/etc/ssh/sshd_config.d/25-hardener-crypto.conf`. On RHEL-family hosts
-it also raises the system-wide policy with `update-crypto-policies --set
-FUTURE` (unless the host explicitly sits on `LEGACY`), so the whole TLS/SSH
-stack moves together; the sshd drop-in still pins the algorithms
-deterministically.
+Writes `/etc/ssh/sshd_config.d/25-hardener-crypto.conf`, which pins the SSH
+algorithms deterministically on every distro.
+
+> ⚠️ **RHEL system-wide policy is opt-in.** `SSH_CRYPTO_SYSTEM_POLICY` (default
+> `no`) controls whether the module also runs `update-crypto-policies --set
+> FUTURE`. It is **off by default** because FUTURE rejects TLS certificates it
+> considers too weak, and several distro package mirrors (notably
+> `mirrors.rockylinux.org`) present such certs — turning it on breaks
+> `dnf`/`yum` downloads system-wide. The sshd drop-in already delivers the SSH
+> hardening without this side effect. Only enable it if your entire TLS estate
+> (including the mirrors you pull from) is FUTURE-clean.
 
 **Config keys**
 
 ```ini
-SSH_MODERN_CRYPTO="yes"      # default yes
-SSH_ALLOWED_GROUPS=""        # e.g. "ssh-users admins"; empty = no restriction
-SSH_LOGIN_GRACE_TIME=20      # seconds
+SSH_MODERN_CRYPTO="yes"        # default yes
+SSH_ALLOWED_GROUPS=""          # e.g. "ssh-users admins"; empty = no restriction
+SSH_LOGIN_GRACE_TIME=20        # seconds
+SSH_CRYPTO_SYSTEM_POLICY="no"  # raise RHEL system policy to FUTURE (breaks dnf — opt-in)
 ```
 
 **Lock-out safety.** A reload never drops the current session. After reload

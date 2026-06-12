@@ -332,26 +332,32 @@ _integrity_apply_aide() {
         aide_conf_path="/etc/aide.conf"
     fi
 
-    # The daily checks below depend on a cron daemon, which minimal cloud
-    # images (e.g. Fedora) do not ship — install and enable it if missing.
-    if ! command -v crond &>/dev/null && ! command -v cron &>/dev/null; then
-        if should_write; then
-            local cron_pkg="cron" cron_svc="cron"
-            if [[ "${DISTRO_FAMILY:-}" == "rhel" ]]; then
-                cron_pkg="cronie"
-                cron_svc="crond"
-            fi
+    # The daily checks below depend on a RUNNING cron daemon. Minimal cloud
+    # images (e.g. Fedora) ship none, and sometimes cron is installed (pulled
+    # in as a dependency) but enabled-not-started — so ensure both presence
+    # AND active state, not just one.
+    local cron_svc="cron"
+    [[ "${DISTRO_FAMILY:-}" == "rhel" ]] && cron_svc="crond"
+
+    if should_write; then
+        if ! command -v crond &>/dev/null && ! command -v cron &>/dev/null; then
+            local cron_pkg="cron"
+            [[ "${DISTRO_FAMILY:-}" == "rhel" ]] && cron_pkg="cronie"
             log_info "integrity_apply: no cron daemon found — installing ${cron_pkg}"
-            if pkg_install "${cron_pkg}"; then
-                systemctl enable --now "${cron_svc}" 2>/dev/null \
-                    || log_warn "integrity_apply: could not start ${cron_svc}"
+            pkg_install "${cron_pkg}" \
+                || log_warn "integrity_apply: failed to install ${cron_pkg} — daily checks will not run"
+        fi
+        # Start + enable whenever the service exists but is not active
+        if svc_exists "${cron_svc}" && ! svc_is_active "${cron_svc}"; then
+            if systemctl enable --now "${cron_svc}" 2>/dev/null; then
+                log_info "integrity_apply: ${cron_svc} enabled and started"
                 (( CHANGES_APPLIED++ )) || true
             else
-                log_warn "integrity_apply: failed to install ${cron_pkg} — daily checks will not run"
+                log_warn "integrity_apply: could not start ${cron_svc} — daily checks will not run until it is active"
             fi
-        else
-            log_info "[DRY-RUN] Would install and enable a cron daemon (required for daily checks)"
         fi
+    else
+        log_info "[DRY-RUN] Would ensure a cron daemon is installed, enabled, and started"
     fi
 
     # Write daily cron job

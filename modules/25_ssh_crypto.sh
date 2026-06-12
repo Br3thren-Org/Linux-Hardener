@@ -29,6 +29,12 @@ readonly _SSHC_HOSTKEYALGS="ssh-ed25519,ssh-ed25519-cert-v01@openssh.com,rsa-sha
 : "${SSH_MODERN_CRYPTO:=yes}"
 : "${SSH_ALLOWED_GROUPS:=}"
 : "${SSH_LOGIN_GRACE_TIME:=20}"
+# Raise the RHEL SYSTEM-WIDE crypto policy to FUTURE. OFF by default: FUTURE
+# rejects TLS certificates with keys it considers too weak, and several distro
+# package mirrors (notably mirrors.rockylinux.org) present such certs — turning
+# it on breaks dnf/yum downloads system-wide. The sshd drop-in below already
+# enforces modern SSH crypto deterministically without this side effect.
+: "${SSH_CRYPTO_SYSTEM_POLICY:=no}"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -202,10 +208,11 @@ ssh_crypto_apply() {
         return 0
     fi
 
-    # ── RHEL family: raise the system-wide crypto policy as well, so the
-    # whole TLS/SSH stack moves together (the drop-in still pins sshd
-    # deterministically; the policy covers everything else).
-    if [[ "${DISTRO_FAMILY}" == "rhel" ]] && command -v update-crypto-policies &>/dev/null; then
+    # ── RHEL family: optionally raise the system-wide crypto policy. OFF by
+    # default — FUTURE breaks dnf TLS to mirrors with "too weak" certs. The
+    # sshd drop-in below is the deterministic SSH-hardening mechanism either way.
+    if [[ "${SSH_CRYPTO_SYSTEM_POLICY}" == "yes" && "${DISTRO_FAMILY}" == "rhel" ]] \
+            && command -v update-crypto-policies &>/dev/null; then
         local current_policy
         current_policy="$(update-crypto-policies --show 2>/dev/null || echo unknown)"
         case "${current_policy}" in
