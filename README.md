@@ -8,8 +8,9 @@ Production-safe, auditable, reversible, distro-aware. Every change includes a re
 
 Full 8-distro matrix measured 2026-06-12 with current **Lynis 3.1.6** on fresh
 Hetzner CPX22 instances via `orchestrate.sh` — a full `harden.sh --apply`
-(all modules, including SSH crypto policy, kernel command-line hardening, and
-LUKS-capable build) followed by a reboot.
+(every module, including the SSH crypto policy, kernel command-line hardening,
+remote-syslog, and LUKS-capable modules) followed by a reboot and a
+post-reboot re-validation. All distros complete with `[PASS]`.
 
 | Distro | Before | After | Delta |
 |---|---|---|---|
