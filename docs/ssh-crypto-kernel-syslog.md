@@ -66,6 +66,30 @@ The policy requires OpenSSH ≥ 7.3 (curve25519, ETM MACs, chacha20). Every
 maintained client qualifies. Truly ancient clients (RHEL 6, PuTTY < 0.68)
 will fail to connect — intended.
 
+### Expected log noise: RSA host key
+
+`RequiredRSASize 4096` enforces the spec's "disable RSA < 4096" rule. Most
+cloud images ship a 3072-bit RSA **host** key, so after apply you will see:
+
+```
+sshd: Host key /etc/ssh/ssh_host_rsa_key: Invalid key length
+```
+
+This is benign — connections use the Ed25519 host key, which every modern
+client prefers. To silence it, regenerate a 4096-bit RSA host key
+(`ssh-keygen -t rsa -b 4096 -f /etc/ssh/ssh_host_rsa_key -N ""`) or remove the
+RSA host key entirely if all your clients support Ed25519.
+
+### Live-test status
+
+All three modules were validated end-to-end on fresh Hetzner debian-12 and
+rocky-9 instances: SSH crypto applied **over an active SSH session** without
+lock-out (handshake probe confirmed, auto-revert proven against an
+unnegotiable config), the RHEL `update-crypto-policies --set FUTURE` path,
+kernel parameters active in `/proc/cmdline` after reboot, remote-syslog
+end-to-end delivery including queue-and-flush across a collector outage, and
+clean rollback of all three.
+
 ---
 
 ## 2. Kernel Command Line (`modules/15_kernel_cmdline.sh`)
