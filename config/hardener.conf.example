@@ -11,6 +11,10 @@
 # -----------------------------------------------------------------------------
 HARDENING_PROFILE="aggressive"
 
+# Global dry-run override: when "yes", an --apply run is demoted to dry-run
+# (prints every change, writes nothing, restarts nothing).
+DRY_RUN="no"
+
 # -----------------------------------------------------------------------------
 # SSH
 # -----------------------------------------------------------------------------
@@ -19,6 +23,21 @@ SSH_PERMIT_ROOT_LOGIN="prohibit-password"
 SSH_PASSWORD_AUTH="no"
 SSH_ALLOW_TCP_FORWARDING="no"
 SSH_ALLOW_AGENT_FORWARDING="no"
+
+# -----------------------------------------------------------------------------
+# SSH crypto policy (modules/25_ssh_crypto.sh)
+# SSH_MODERN_CRYPTO: modern-only kex/cipher/MAC/host-key algorithms
+#   (curve25519, chacha20/aes256-gcm, sha2-etm, ed25519 + RSA>=4096). Applied
+#   via a drop-in, validated with sshd -t, then proven with a live localhost
+#   handshake — the module auto-reverts if new connections cannot negotiate.
+#   On RHEL the system-wide crypto policy is also raised to FUTURE (unless
+#   LEGACY was explicitly chosen).
+# SSH_ALLOWED_GROUPS: space-separated AllowGroups list; empty = no restriction.
+#   Refused unless at least one user is a member (lock-out guard).
+# -----------------------------------------------------------------------------
+SSH_MODERN_CRYPTO="yes"
+SSH_ALLOWED_GROUPS=""
+SSH_LOGIN_GRACE_TIME=20
 
 # -----------------------------------------------------------------------------
 # Firewall
@@ -84,6 +103,19 @@ AUDITD_RULES="minimal"
 ENABLE_UNATTENDED_UPGRADES="true"
 
 # -----------------------------------------------------------------------------
+# Remote syslog (modules/50_remote_syslog.sh) — Lynis LOGG-2154
+# RSYSLOG_REMOTE_HOST: "host:port" of the collector; empty disables forwarding.
+#   Port defaults: 514 (tcp) / 6514 (tls). auth, kernel, and warning-or-worse
+#   logs are forwarded with a bounded disk queue (100 MB) that retries through
+#   collector outages without ever blocking local logging.
+# RSYSLOG_REMOTE_PROTOCOL: tcp | tls (tls requires RSYSLOG_REMOTE_CERT, the
+#   CA certificate that signed the collector's certificate).
+# -----------------------------------------------------------------------------
+RSYSLOG_REMOTE_HOST=""
+RSYSLOG_REMOTE_PROTOCOL="tcp"
+RSYSLOG_REMOTE_CERT=""
+
+# -----------------------------------------------------------------------------
 # Integrity
 # Installs and initialises AIDE file-integrity monitoring.
 # -----------------------------------------------------------------------------
@@ -100,6 +132,19 @@ DISABLE_IPV6="false"
 RESTRICT_DMESG="true"
 RESTRICT_KPTR="true"
 ENABLE_MODULES_DISABLED="false"
+
+# -----------------------------------------------------------------------------
+# Kernel command line (modules/15_kernel_cmdline.sh)
+# KERNEL_CMDLINE_HARDEN: append boot-time mitigations to GRUB_CMDLINE_LINUX
+#   (init_on_alloc/free, slab_nomerge, page_alloc.shuffle, vsyscall=none,
+#   randomize_kstack_offset, spectre_v2=on, spec_store_bypass_disable=seccomp;
+#   tsx=off when the CPU has TSX; lockdown=integrity only with Secure Boot).
+#   GRUB is regenerated with verify-or-revert; takes effect on next reboot.
+#   Expect a small performance cost from the speculative-execution settings.
+# KERNEL_CMDLINE_EXTRA: extra space-separated parameters to append verbatim.
+# -----------------------------------------------------------------------------
+KERNEL_CMDLINE_HARDEN="no"
+KERNEL_CMDLINE_EXTRA=""
 
 # -----------------------------------------------------------------------------
 # Lynis

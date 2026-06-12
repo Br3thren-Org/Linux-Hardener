@@ -31,10 +31,13 @@ Modules (execution order):
   services    Disable unnecessary or dangerous services
   auth        Harden local authentication and PAM settings
   ssh         Harden SSH server configuration
+  ssh_crypto  Modern-only SSH kex/cipher/MAC policy + AllowGroups scoping
   firewall    Configure host-based firewall rules
   sysctl      Apply kernel hardening via sysctl
+  kernel_cmdline  Boot-time kernel mitigations (optional; KERNEL_CMDLINE_HARDEN=yes)
   filesystem  Set secure mount options and file permissions
   logging     Configure system logging and audit rules
+  remote_syslog  Forward logs to a remote collector (optional; RSYSLOG_REMOTE_HOST)
   integrity   Deploy file-integrity monitoring (AIDE)
   systemd_hardening  Apply security sandboxing to systemd services
   luks        At-rest encryption (optional; LUKS_ENABLED=yes in config/luks.conf)
@@ -211,10 +214,13 @@ readonly MODULES=(
     services
     auth
     ssh
+    ssh_crypto
     firewall
     sysctl
+    kernel_cmdline
     filesystem
     logging
+    remote_syslog
     integrity
     systemd_hardening
     luks
@@ -245,6 +251,12 @@ main() {
         log_info "LUKS mode overridden via CLI: ${LUKS_MODE}"
     fi
 
+    # DRY_RUN=yes in the config demotes an apply run to dry-run globally
+    if [[ "${DRY_RUN:-no}" == "yes" && "${RUN_MODE}" == "apply" ]]; then
+        RUN_MODE="dry-run"
+        log_warn "DRY_RUN=yes in config — running in dry-run mode (no changes will be written)"
+    fi
+
     detect_distro
 
     # Source distro-specific adapter
@@ -263,13 +275,19 @@ main() {
             ;;
     esac
 
-    # Source all hardening module files
+    # Source all hardening module files. Core modules live in lib/<name>.sh;
+    # optional feature modules live in modules/NN_<name>.sh (numeric prefix).
     local module
     for module in "${MODULES[@]}"; do
         local module_file="${SCRIPT_DIR}/lib/${module}.sh"
-        # Optional feature modules live under modules/ with a numeric prefix
-        if [[ "${module}" == "luks" ]]; then
-            module_file="${SCRIPT_DIR}/modules/20_luks.sh"
+        if [[ ! -f "${module_file}" ]]; then
+            local candidate
+            for candidate in "${SCRIPT_DIR}/modules/"[0-9]*"_${module}.sh"; do
+                if [[ -f "${candidate}" ]]; then
+                    module_file="${candidate}"
+                    break
+                fi
+            done
         fi
         if [[ -f "${module_file}" ]]; then
             # shellcheck source=/dev/null

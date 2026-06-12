@@ -201,6 +201,81 @@ run_checks() {
         "sshd -T 2>/dev/null | grep -i '^passwordauthentication'" \
         "no"
 
+    # ── SSH crypto policy ─────────────────────────────────────────────────────
+    # Gated on SSH_MODERN_CRYPTO=yes in config/hardener.conf (default yes).
+
+    local conf_file="${PARENT_DIR}/config/hardener.conf"
+    _conf_val() {
+        # _conf_val KEY DEFAULT — read a key from the hardener config
+        local v
+        v="$(awk -F= -v k="^${1}=" '$0 ~ k {gsub(/["'\'' ]/,"",$2); print $2}' "${conf_file}" 2>/dev/null | tail -1)"
+        printf '%s' "${v:-${2}}"
+    }
+
+    if [[ "$(_conf_val SSH_MODERN_CRYPTO yes)" == "yes" ]]; then
+        section "SSH Crypto Policy"
+
+        check "No weak kex algorithms" \
+            "sshd -T 2>/dev/null | grep '^kexalgorithms' | grep -vqE 'diffie-hellman-group(1|14)-sha1' && echo ok" \
+            "ok"
+
+        check "No CBC ciphers" \
+            "sshd -T 2>/dev/null | grep '^ciphers' | grep -vq -- '-cbc' && echo ok" \
+            "ok"
+
+        check "ETM MACs only" \
+            "sshd -T 2>/dev/null | grep '^macs' | grep -vqE 'hmac-(sha1|md5)(,|$)' && echo ok" \
+            "ok"
+
+        check "Crypto drop-in present" \
+            "test -f /etc/ssh/sshd_config.d/25-hardener-crypto.conf" \
+            ""
+    fi
+
+    # ── Kernel command line ───────────────────────────────────────────────────
+    # Active parameters require a reboot after apply; pending shows as WARN.
+
+    if [[ "$(_conf_val KERNEL_CMDLINE_HARDEN no)" == "yes" ]]; then
+        section "Kernel Command Line"
+
+        check "Configured in GRUB" \
+            "grep '^GRUB_CMDLINE_LINUX=' /etc/default/grub | grep -q init_on_alloc=1 && echo ok" \
+            "ok"
+
+        check "Active (init_on_alloc)" \
+            "grep -qw init_on_alloc=1 /proc/cmdline && echo active || echo pending-reboot" \
+            "active"
+
+        check "Active (slab_nomerge)" \
+            "grep -qw slab_nomerge /proc/cmdline && echo active || echo pending-reboot" \
+            "active"
+
+        # lockdown engagement only checked when it was actually requested
+        if grep -qw 'lockdown=integrity' /proc/cmdline 2>/dev/null; then
+            check "Lockdown engaged" \
+                "grep -o '\[integrity\]' /sys/kernel/security/lockdown 2>/dev/null" \
+                "integrity"
+        fi
+    fi
+
+    # ── Remote syslog ─────────────────────────────────────────────────────────
+
+    if [[ -n "$(_conf_val RSYSLOG_REMOTE_HOST '')" ]]; then
+        section "Remote Syslog"
+
+        check "rsyslog active" \
+            "systemctl is-active rsyslog" \
+            "active"
+
+        check "rsyslog config valid" \
+            "rsyslogd -N1" \
+            ""
+
+        check "Forwarding rule present" \
+            "grep -q '@@' /etc/rsyslog.d/99-hardener-remote.conf" \
+            ""
+    fi
+
     # ── sysctl ────────────────────────────────────────────────────────────────
 
     section "sysctl Kernel Parameters"
