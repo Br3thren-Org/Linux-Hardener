@@ -167,6 +167,16 @@ run_module() {
 
     log_info "═══ Module: ${module_name} ═══"
 
+    # A module in the run list with NO functions defined means its file failed
+    # to source — warn loudly rather than silently doing nothing.
+    if ! declare -f "${module_name}_audit" > /dev/null 2>&1 \
+            && ! declare -f "${module_name}_apply" > /dev/null 2>&1 \
+            && ! declare -f "${module_name}_rollback" > /dev/null 2>&1; then
+        log_warn "Module '${module_name}' has no audit/apply/rollback functions — its file was not sourced (deployment incomplete?)"
+        (( CHANGES_FAILED++ )) || true
+        return 0
+    fi
+
     # Always run audit if the function exists
     if declare -f "${module_name}_audit" > /dev/null 2>&1; then
         "${module_name}_audit" || true

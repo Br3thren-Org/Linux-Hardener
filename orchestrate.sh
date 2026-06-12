@@ -360,6 +360,7 @@ test_server() {
     remote_exec "${server_ip}" "mkdir -p /opt/linux-hardener"
 
     remote_copy_to "${server_ip}" "${SCRIPT_DIR}/lib/"      "/opt/linux-hardener/lib"
+    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/modules/"  "/opt/linux-hardener/modules"
     remote_copy_to "${server_ip}" "${SCRIPT_DIR}/scripts/"  "/opt/linux-hardener/scripts"
     remote_copy_to "${server_ip}" "${SCRIPT_DIR}/config/"   "/opt/linux-hardener/config"
     remote_copy_to "${server_ip}" "${SCRIPT_DIR}/harden.sh" "/opt/linux-hardener/harden.sh"

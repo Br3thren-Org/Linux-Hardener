@@ -298,6 +298,7 @@ printf '[2/8] Copying framework to target...\n'
 remote_exec mkdir -p "${REMOTE_DIR}"
 remote_exec chown "${USER}:${USER}" "${REMOTE_DIR}"
 remote_copy_to "${SCRIPT_DIR}/lib/"      "${REMOTE_DIR}/lib"
+remote_copy_to "${SCRIPT_DIR}/modules/"  "${REMOTE_DIR}/modules"
 remote_copy_to "${SCRIPT_DIR}/scripts/"  "${REMOTE_DIR}/scripts"
 remote_copy_to "${SCRIPT_DIR}/config/"   "${REMOTE_DIR}/config"
 remote_copy_to "${SCRIPT_DIR}/harden.sh" "${REMOTE_DIR}/harden.sh"
