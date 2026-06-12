@@ -6,29 +6,29 @@ Production-safe, auditable, reversible, distro-aware. Every change includes a re
 
 ## Tested Results
 
-All rows measured 2026-06-12 with current **Lynis 3.1.6** on fresh Hetzner CPX22
-instances after a full `harden.sh --apply`.
+Full 8-distro matrix measured 2026-06-12 with current **Lynis 3.1.6** on fresh
+Hetzner CPX22 instances via `orchestrate.sh` — a full `harden.sh --apply`
+(all modules, including SSH crypto policy, kernel command-line hardening, and
+LUKS-capable build) followed by a reboot.
 
 | Distro | Before | After | Delta |
 |---|---|---|---|
 | Debian 13 (Trixie) | 67 | **90** | +23 |
-| Debian 12 (Bookworm) ¹ | 61 | **89** | +28 |
-| Rocky Linux 9 ¹ | 66 | **88** | +22 |
+| Debian 12 (Bookworm) | 64 | **89** | +25 |
 | Fedora 43 | 65 | **88** | +23 |
+| Rocky Linux 9 | 66 | **86** | +20 |
 | Rocky Linux 10 | 66 | **86** | +20 |
 | AlmaLinux 9 | 66 | **86** | +20 |
-| AlmaLinux 10 | 67 | **86** | +19 |
-| Ubuntu 24.04 ² | 60 | **83** | +23 |
+| AlmaLinux 10 | 66 | **86** | +20 |
+| Ubuntu 24.04 ¹ | 60 | **83** | +23 |
 
-*¹ Audited after a reboot, which clears the transient "reboot needed" /
-"stale iptables modules" warnings — the orchestrated rows above were audited
-without rebooting and typically gain 1–2 more points after one.*
-*² Ubuntu is penalized by Lynis for phased apt updates ("vulnerable packages")
+Every row applies with **0 failed changes** and **0 Lynis warnings** after a
+reboot. The remaining suggestions are all operator/infrastructure choices
+(separate `/home` and `/var` partitions, non-default SSH port, a remote syslog
+collector, automation tooling, opt-in `ENABLE_MODULES_DISABLED`).
+
+*¹ Ubuntu is penalized by Lynis for phased apt updates ("vulnerable packages")
 and for not recognizing deb822 security sources — both cosmetic.*
-
-Every remaining Lynis suggestion is an operator/infrastructure choice
-(separate `/home` and `/var` partitions, non-default SSH port, remote syslog,
-automation tooling, opt-in `ENABLE_MODULES_DISABLED`).
 
 ## Supported Platforms
 
@@ -217,7 +217,7 @@ Set via `HARDENING_PROFILE` in config. Individual settings always override the p
 
 ## What Gets Hardened
 
-### 57+ changes applied across 11 modules:
+### 60+ changes applied across 14 modules:
 
 **Packages** — Security updates, remove unnecessary packages (telnet, rsh, xinetd, etc.), install security tools (libpam-tmpdir, needrestart, debsums, rkhunter, acct, sysstat), enable unattended security upgrades, restrict compiler access.
 
