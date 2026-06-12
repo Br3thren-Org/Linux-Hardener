@@ -500,6 +500,20 @@ test_server() {
 
         remote_exec "${server_ip}" "reboot" || true
 
+        # Wait for the server to actually go DOWN before polling for it to come
+        # back — otherwise the first poll hits the still-shutting-down host,
+        # declares it "back" prematurely, and the validation that follows
+        # connects mid-shutdown and times out.
+        local down_waited=0
+        printf '[INFO] [%s] Waiting for server to go down...\n' "${server_image}"
+        while (( down_waited < 60 )); do
+            if ! remote_exec "${server_ip}" "true" &>/dev/null 2>&1; then
+                break
+            fi
+            sleep 5
+            (( down_waited += 5 )) || true
+        done
+
         # Wait for SSH to come back
         local elapsed=0
         local timeout=180
@@ -507,7 +521,11 @@ test_server() {
         printf '[INFO] [%s] Waiting for server to come back after reboot...\n' "${server_image}"
 
         while (( elapsed < timeout )); do
-            if remote_exec "${server_ip}" "echo reboot-ok" &>/dev/null 2>&1; then
+            # Require TWO consecutive successful probes so we do not latch onto
+            # a brief early-boot SSH window before services settle.
+            if remote_exec "${server_ip}" "echo reboot-ok" &>/dev/null 2>&1 \
+                    && sleep 3 \
+                    && remote_exec "${server_ip}" "echo reboot-ok" &>/dev/null 2>&1; then
                 printf '[INFO] [%s] Server is back after reboot.\n' "${server_image}"
                 break
             fi
