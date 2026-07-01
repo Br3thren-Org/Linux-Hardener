@@ -102,9 +102,16 @@ open_volume() {
         log "${name}: KMS retrieval failed or key rejected"
     fi
 
-    # 3. Interactive passphrase
+    # 3. Interactive passphrase. Read from the terminal explicitly: this
+    # function runs inside `while read < state-file` loops — with inherited
+    # stdin cryptsetup would consume the remaining state entries as the
+    # "passphrase" and the loop would end early.
+    if [[ ! -r /dev/tty ]]; then
+        log "ERROR: ${name}: no keyfile/KMS and no terminal for a passphrase prompt"
+        return 1
+    fi
     log "${name}: falling back to interactive passphrase"
-    if cryptsetup open "${dev}" "${name}"; then
+    if cryptsetup open "${dev}" "${name}" < /dev/tty; then
         log "${name}: opened with passphrase"
         return 0
     fi

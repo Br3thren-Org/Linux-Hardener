@@ -89,7 +89,7 @@ firewall_apply() {
     case "${DISTRO_FAMILY}" in
         debian)
             debian_setup_firewall
-            _firewall_lockdown_iptables_legacy
+            _firewall_flush_iptables_legacy
             ;;
         rhel)
             rhel_setup_firewall
@@ -100,18 +100,44 @@ firewall_apply() {
     esac
 }
 
-# _firewall_lockdown_iptables_legacy — set iptables default policies to DROP
-# When nftables is the primary firewall, iptables modules may still load.
-# Lynis FIRE-4512 warns about an empty iptables ruleset with ACCEPT policies.
-# This sets DROP on all chains so even if iptables loads, it blocks by default.
-_firewall_lockdown_iptables_legacy() {
+# _firewall_ipt_clean <iptables|ip6tables> — true if the tool is absent or its
+# ruleset is already just the three default-ACCEPT chain policies (no rules).
+_firewall_ipt_clean() {
+    local cmd="${1}"
+    command -v "${cmd}" &>/dev/null || return 0
+    local spec
+    spec="$("${cmd}" -S 2>/dev/null)" || return 1
+    [[ -z "${spec}" ]] && return 1   # unexpected empty output — do not assume clean
+    # Clean iff every line is a default-ACCEPT policy for a built-in chain
+    ! grep -qvE '^-P (INPUT|FORWARD|OUTPUT) ACCEPT$' <<< "${spec}"
+}
+
+# _firewall_flush_iptables_legacy — flush legacy iptables rules and reset
+# policies to ACCEPT. nftables is the primary firewall; a stale iptables
+# ruleset alongside it triggers Lynis FIRE-4512 ("iptables modules loaded
+# but no rules active"). Emptying iptables entirely is intentional — the
+# nftables default-drop ruleset is what filters traffic.
+_firewall_flush_iptables_legacy() {
     if ! command -v iptables &>/dev/null; then
-        log_debug "_firewall_lockdown_iptables_legacy: iptables not found, skipping"
+        log_debug "_firewall_flush_iptables_legacy: iptables not found, skipping"
         return 0
     fi
 
     if ! should_write; then
-        log_info "[DRY-RUN] Would set iptables default policies to DROP"
+        log_info "[DRY-RUN] Would flush legacy iptables rules (policies ACCEPT; nftables is the active firewall)"
+        return 0
+    fi
+
+    # Idempotency guard: if iptables already has no rules and all policies are
+    # ACCEPT, there is nothing to flush — re-running would otherwise re-count a
+    # change on every pass and keep the iteration loop from converging.
+    # Probe with `-S`, NOT iptables-save: on an nftables host, the nftables
+    # service runs `nft flush ruleset`, which removes the shim's auto-created
+    # `ip filter` table, so iptables-save returns empty (ambiguous). `-S`
+    # always prints the base chain policies.
+    if _firewall_ipt_clean iptables && _firewall_ipt_clean ip6tables; then
+        log_debug "_firewall_flush_iptables_legacy: iptables already empty with ACCEPT policies — skipping"
+        (( CHANGES_SKIPPED++ )) || true
         return 0
     fi
 
@@ -139,7 +165,7 @@ _firewall_lockdown_iptables_legacy() {
         "iptables -L -n | head -10" \
         "N/A"
 
-    log_success "_firewall_lockdown_iptables_legacy: legacy iptables flushed"
+    log_success "_firewall_flush_iptables_legacy: legacy iptables flushed"
     (( CHANGES_APPLIED++ )) || true
 }
 

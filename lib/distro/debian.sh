@@ -113,14 +113,19 @@ debian_setup_firewall() {
 
     local ssh_port="${SSH_PORT:-22}"
 
-    # Build allowed TCP input rules
-    local tcp_rules=""
-    local raw_tcp="${FIREWALL_ALLOWED_TCP_IN:-${ssh_port}}"
+    # Build allowed TCP input rules. The SSH port is ALWAYS included first —
+    # a FIREWALL_ALLOWED_TCP_IN list without it would otherwise load a
+    # default-drop ruleset with no SSH rule: permanent remote lockout.
+    local tcp_rules="        tcp dport ${ssh_port} accept"$'\n'
     local port
-    IFS=',' read -ra _ports <<< "${raw_tcp}"
+    IFS=',' read -ra _ports <<< "${FIREWALL_ALLOWED_TCP_IN:-}"
     for port in "${_ports[@]}"; do
         port="${port// /}"
-        [[ -z "${port}" ]] && continue
+        [[ -z "${port}" || "${port}" == "${ssh_port}" ]] && continue
+        if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+            log_warn "debian_setup_firewall: skipping invalid TCP port token '${port}'"
+            continue
+        fi
         tcp_rules+="        tcp dport ${port} accept"$'\n'
     done
 
@@ -131,6 +136,10 @@ debian_setup_firewall() {
         for port in "${_ports[@]}"; do
             port="${port// /}"
             [[ -z "${port}" ]] && continue
+            if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+                log_warn "debian_setup_firewall: skipping invalid UDP port token '${port}'"
+                continue
+            fi
             udp_rules+="        udp dport ${port} accept"$'\n'
         done
     fi
@@ -181,10 +190,39 @@ ${udp_rules}
 EOF
 )"
 
+    # Validate the candidate ruleset BEFORE installing it — a bad token would
+    # otherwise leave a config that fails at every boot (empty ruleset,
+    # fail-open) while this run reports success.
+    local nft_candidate
+    nft_candidate="$(mktemp)"
+    printf '%s\n' "${nft_conf}" > "${nft_candidate}"
+    if ! nft -c -f "${nft_candidate}" 2>/dev/null; then
+        log_error "debian_setup_firewall: generated ruleset failed 'nft -c' validation — not installing"
+        nft -c -f "${nft_candidate}" 2>&1 | head -3 | while IFS= read -r line; do
+            log_error "debian_setup_firewall:   ${line}"
+        done
+        rm -f "${nft_candidate}"
+        (( CHANGES_FAILED++ )) || true
+        return 1
+    fi
+    rm -f "${nft_candidate}"
+
+    local nft_rc=0
     write_file_if_changed \
         "/etc/nftables.conf" \
         "${nft_conf}" \
-        "Write nftables firewall ruleset"
+        "Write nftables firewall ruleset" || nft_rc=$?
+
+    systemctl enable nftables 2>/dev/null \
+        || log_warn "debian_setup_firewall: could not enable nftables service"
+
+    # Only (re)load when the ruleset actually changed or the service isn't
+    # running. Restarting on every idempotent pass needlessly drops and
+    # reloads the firewall (and briefly perturbs the iptables-nft view).
+    if [[ "${nft_rc}" -eq 2 ]] && systemctl is-active --quiet nftables; then
+        log_debug "debian_setup_firewall: nftables config unchanged and active — no reload"
+        return 0
+    fi
 
     log_change \
         "nftables firewall configured" \
@@ -193,8 +231,13 @@ EOF
         "nft list ruleset" \
         "systemctl stop nftables && nft flush ruleset"
 
-    systemctl enable nftables
-    systemctl restart nftables
+    if ! systemctl restart nftables; then
+        log_error "debian_setup_firewall: nftables failed to restart — restoring previous config"
+        restore_file "/etc/nftables.conf" || true
+        systemctl restart nftables 2>/dev/null || true
+        (( CHANGES_FAILED++ )) || true
+        return 1
+    fi
     log_success "nftables firewall enabled and active"
 }
 

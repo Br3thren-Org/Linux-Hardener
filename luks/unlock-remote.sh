@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)          usage ;;
         *)
             printf 'ERROR: Unknown option: %s\n' "$1" >&2
-            usage
+            exit 1
             ;;
     esac
     shift
@@ -81,6 +81,18 @@ if [[ -z "${SSH_KEY}" || ! -f "${SSH_KEY}" ]]; then
     printf 'ERROR: --key is required and must exist: %s\n' "${SSH_KEY:-<not set>}" >&2
     exit 1
 fi
+
+# Host-key pinning (trust-on-first-use): the LUKS passphrase is piped over
+# this connection — with no host authentication an on-path attacker who
+# hijacks the IP during reboot receives the full disk passphrase. The
+# Dropbear and OS host keys are recorded next to the unlock key on first
+# contact and verified on every later unlock.
+KNOWN_HOSTS_FILE="${UNLOCK_KNOWN_HOSTS:-$(dirname "${SSH_KEY}")/known_hosts}"
+touch "${KNOWN_HOSTS_FILE}" 2>/dev/null || KNOWN_HOSTS_FILE="${HOME}/.ssh/luks-unlock-known_hosts"
+SSH_HOSTKEY_OPTS=(
+    -o StrictHostKeyChecking=accept-new
+    -o "UserKnownHostsFile=${KNOWN_HOSTS_FILE}"
+)
 
 # ─── Resolve Passphrase ─────────────────────────────────────────────────────
 
@@ -143,7 +155,7 @@ interval=5
 while (( elapsed < TIMEOUT )); do
     if ssh \
         -i "${SSH_KEY}" -p "${DROPBEAR_PORT}" \
-        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        "${SSH_HOSTKEY_OPTS[@]}" \
         -o ConnectTimeout=5 -o BatchMode=yes \
         "root@${HOST}" 'true' &>/dev/null 2>&1; then
         printf '  Dropbear is up.\n'
@@ -183,7 +195,7 @@ unlock_result=0
 # Step A: upload passphrase to a temp file on the initramfs
 printf '%s' "${PASSPHRASE}" | ssh \
     -i "${SSH_KEY}" -p "${DROPBEAR_PORT}" \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "${SSH_HOSTKEY_OPTS[@]}" \
     -o ConnectTimeout=10 \
     "root@${HOST}" 'cat > /tmp/.lp && chmod 600 /tmp/.lp' 2>/dev/null || {
         printf '  WARN: passphrase upload may have failed.\n'
@@ -194,7 +206,7 @@ printf '%s' "${PASSPHRASE}" | ssh \
 # triggers the actual unlock and boot continuation in one step.
 ssh \
     -i "${SSH_KEY}" -p "${DROPBEAR_PORT}" \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "${SSH_HOSTKEY_OPTS[@]}" \
     -o ConnectTimeout=10 \
     "root@${HOST}" '
         # Method 1: Write to passfifo (Debian standard method)
@@ -226,7 +238,7 @@ elapsed=0
 while (( elapsed < TIMEOUT )); do
     if ssh \
         -i "${SSH_KEY}" -p "${SSH_PORT}" \
-        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        "${SSH_HOSTKEY_OPTS[@]}" \
         -o ConnectTimeout=5 -o BatchMode=yes \
         "root@${HOST}" 'true' &>/dev/null 2>&1; then
         printf '  Full OS is up.\n'

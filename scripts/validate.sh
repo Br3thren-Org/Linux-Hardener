@@ -25,14 +25,18 @@ WARN_COUNT=0
 
 # ─── Check function ───────────────────────────────────────────────────────────
 
-# check <name> <cmd> <expected>
+# check <name> <cmd> <expected> [severity]
 #   name     — human-readable label (left-aligned in 30 chars)
 #   cmd      — command string to eval
 #   expected — expected substring/value in output; empty means any successful exit
+#   severity — "hard" (default): a value mismatch is a FAIL;
+#              "soft": a value mismatch is only a WARN (legitimately-pending
+#              states like reboot-required kernel params or NTP still syncing)
 check() {
     local name="${1}"
     local cmd="${2}"
     local expected="${3}"
+    local severity="${4:-hard}"
 
     printf '  %-30s ' "${name}"
 
@@ -58,9 +62,13 @@ check() {
         printf 'PASS\n'
         (( PASS_COUNT++ )) || true
         return 0
-    else
+    elif [[ "${severity}" == "soft" ]]; then
         printf 'WARN  (got: %s)\n' "${output}"
         (( WARN_COUNT++ )) || true
+        return 0
+    else
+        printf 'FAIL  (got: %s)\n' "${output}"
+        (( FAIL_COUNT++ )) || true
         return 0
     fi
 }
@@ -134,7 +142,8 @@ run_checks() {
 
     check "NTP synchronized" \
         "timedatectl show --property=NTPSynchronized --value 2>/dev/null || timedatectl status 2>/dev/null | awk '/synchronized/ {print \$NF}'" \
-        "yes"
+        "yes" \
+        "soft"
 
     # Check whichever time-sync service is present
     local timesync_active=false
@@ -216,15 +225,15 @@ run_checks() {
         section "SSH Crypto Policy"
 
         check "No weak kex algorithms" \
-            "sshd -T 2>/dev/null | grep '^kexalgorithms' | grep -vqE 'diffie-hellman-group(1|14)-sha1' && echo ok" \
+            "sshd -T 2>/dev/null | grep '^kexalgorithms' | grep -vqE 'diffie-hellman-group(1|14|-exchange)-sha1' && echo ok" \
             "ok"
 
         check "No CBC ciphers" \
             "sshd -T 2>/dev/null | grep '^ciphers' | grep -vq -- '-cbc' && echo ok" \
             "ok"
 
-        check "ETM MACs only" \
-            "sshd -T 2>/dev/null | grep '^macs' | grep -vqE 'hmac-(sha1|md5)(,|$)' && echo ok" \
+        check "No SHA1/MD5 MACs" \
+            "sshd -T 2>/dev/null | grep '^macs' | grep -vqE 'hmac-(sha1|md5)' && echo ok" \
             "ok"
 
         check "Crypto drop-in present" \
@@ -259,11 +268,13 @@ run_checks() {
 
         check "Active (init_on_alloc)" \
             "grep -qw init_on_alloc=1 /proc/cmdline && echo active || echo pending-reboot" \
-            "active"
+            "active" \
+            "soft"
 
         check "Active (slab_nomerge)" \
             "grep -qw slab_nomerge /proc/cmdline && echo active || echo pending-reboot" \
-            "active"
+            "active" \
+            "soft"
 
         # lockdown engagement only checked when it was actually requested
         if grep -qw 'lockdown=integrity' /proc/cmdline 2>/dev/null; then

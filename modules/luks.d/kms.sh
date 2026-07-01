@@ -45,7 +45,8 @@ _luks_kms_escrow_aws() {
         return 1
     fi
 
-    local blob="/tmp/.luks-escrow-${name}.$$"
+    local blob
+    blob="$(mktemp /dev/shm/.luks-escrow.XXXXXX)"
     if ! aws kms encrypt \
             --key-id "${LUKS_KMS_AWS_KEY_ID}" \
             --plaintext "fileb://${keyfile}" \
@@ -78,7 +79,8 @@ _luks_kms_escrow_gcp() {
     command -v gcloud &>/dev/null || { log_warn "luks-kms: gcloud CLI missing — escrow skipped"; return 1; }
     [[ -n "${LUKS_KMS_GCP_KEYRING:-}" ]] || { log_warn "luks-kms: LUKS_KMS_GCP_KEYRING not set"; return 1; }
 
-    local blob="/tmp/.luks-escrow-${name}.$$"
+    local blob
+    blob="$(mktemp /dev/shm/.luks-escrow.XXXXXX)"
     if ! gcloud kms encrypt \
             --key "${LUKS_KMS_GCP_KEYRING}" \
             --plaintext-file "${keyfile}" \
@@ -131,7 +133,8 @@ _luks_kms_retrieve() {
     case "${provider}" in
         aws)
             command -v aws &>/dev/null || return 1
-            local blob="/tmp/.luks-retrieve-${name}.$$"
+            local blob
+            blob="$(mktemp /dev/shm/.luks-retrieve.XXXXXX)"
             if [[ -n "${LUKS_KMS_AWS_S3_BUCKET:-}" ]]; then
                 aws s3 cp "s3://${LUKS_KMS_AWS_S3_BUCKET}/luks/${name}.key.kms" "${blob}" &>/dev/null || return 1
             else
@@ -149,7 +152,8 @@ _luks_kms_retrieve() {
         gcp)
             command -v gcloud &>/dev/null || return 1
             [[ -n "${LUKS_KMS_GCP_BUCKET:-}" ]] || return 1
-            local blob="/tmp/.luks-retrieve-${name}.$$"
+            local blob
+            blob="$(mktemp /dev/shm/.luks-retrieve.XXXXXX)"
             gcloud storage cp "gs://${LUKS_KMS_GCP_BUCKET}/luks/${name}.key.kms" "${blob}" &>/dev/null || return 1
             ( umask 277; gcloud kms decrypt \
                 --key "${LUKS_KMS_GCP_KEYRING}" \
@@ -219,7 +223,17 @@ _luks_nbde_bind() {
 
     local keyfile
     keyfile="$(_luks_state_entries "volume" | awk -F'|' -v d="${device}" '$3==d{print $5; exit}')"
-    local bind_args=( luks bind -y -d "${device}" tang "{\"url\":\"${LUKS_TANG_URL}\"}" )
+
+    # Pin the Tang advertisement when a thumbprint is configured — `-y` alone
+    # trusts whatever keys the (typically plain-HTTP) Tang endpoint serves at
+    # bind time, so a MITM could substitute their own.
+    local tang_cfg="{\"url\":\"${LUKS_TANG_URL}\"}"
+    if [[ -n "${LUKS_TANG_THUMBPRINT:-}" ]]; then
+        tang_cfg="{\"url\":\"${LUKS_TANG_URL}\",\"thp\":\"${LUKS_TANG_THUMBPRINT}\"}"
+    else
+        log_warn "luks-nbde: LUKS_TANG_THUMBPRINT not set — trusting the Tang advertisement unverified (set it to pin the server key)"
+    fi
+    local bind_args=( luks bind -y -d "${device}" tang "${tang_cfg}" )
 
     local rc=1
     if [[ -n "${keyfile}" && -f "${keyfile}" ]]; then

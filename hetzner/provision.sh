@@ -12,10 +12,12 @@ source "${SCRIPT_DIR}/api.sh"
 
 # ─── Config (read from environment) ──────────────────────────────────────────
 
-HETZNER_SERVER_TYPE="${HETZNER_SERVER_TYPE:-cx22}"
+HETZNER_SERVER_TYPE="${HETZNER_SERVER_TYPE:-cx23}"
 HETZNER_LOCATION="${HETZNER_LOCATION:-nbg1}"
 HETZNER_SSH_KEY_NAME="${HETZNER_SSH_KEY_NAME:-}"
 HETZNER_SSH_KEY_PATH="${HETZNER_SSH_KEY_PATH:-${HOME}/.ssh/id_ed25519}"
+# Expand a leading ~ (unlike env/config, ssh -i does not do tilde expansion)
+HETZNER_SSH_KEY_PATH="${HETZNER_SSH_KEY_PATH/#\~/${HOME}}"
 HETZNER_IMAGES="${HETZNER_IMAGES:-debian-12}"
 
 # ─── Build ID ─────────────────────────────────────────────────────────────────
@@ -112,10 +114,14 @@ create_server() {
                 --ssh-key "${HETZNER_SSH_KEY_NAME}" \
                 -o json 2>/dev/null
         )"; then
-            server_id="$(printf '%s' "${hcloud_output}" | jq -r '.server.id')"
-            server_ip="$(printf '%s' "${hcloud_output}" | jq -r '.server.public_net.ipv4.ip')"
-            used_hcloud=true
-            printf '[INFO] hcloud created server id=%s ip=%s\n' "${server_id}" "${server_ip}" >&2
+            server_id="$(printf '%s' "${hcloud_output}" | jq -r '.server.id // empty')"
+            server_ip="$(printf '%s' "${hcloud_output}" | jq -r '.server.public_net.ipv4.ip // empty')"
+            if [[ -n "${server_id}" && -n "${server_ip}" ]]; then
+                used_hcloud=true
+                printf '[INFO] hcloud created server id=%s ip=%s\n' "${server_id}" "${server_ip}" >&2
+            else
+                printf '[WARN] hcloud output missing server id/ip — falling back to REST API\n' >&2
+            fi
         else
             printf '[WARN] hcloud server create failed — falling back to REST API\n' >&2
         fi
@@ -155,11 +161,39 @@ create_server() {
         printf '[INFO] API created server id=%s ip=%s\n' "${server_id}" "${server_ip}" >&2
     fi
 
+    # Record the server BEFORE the SSH wait: if wait_for_ssh times out and
+    # aborts the run, this log is the only trace of the billing server.
+    if [[ -n "${CREATED_SERVERS_LOG:-}" ]]; then
+        printf '%s|%s|%s|%s\n' "${server_id}" "${server_name}" "${server_ip}" "${image}" \
+            >> "${CREATED_SERVERS_LOG}"
+    fi
+
     # ── Wait for SSH ──────────────────────────────────────────────────────────
     wait_for_ssh "${server_ip}" 120
 
     # Final output line consumed by caller — stdout only, no INFO noise
     printf '%s|%s|%s|%s\n' "${server_id}" "${server_name}" "${server_ip}" "${image}"
+}
+
+# ─── Manifest ─────────────────────────────────────────────────────────────────
+
+# write_manifest <path> <json_entry...> — write entries as a JSON array
+write_manifest() {
+    local manifest_path="${1}"
+    shift
+    local entries=("$@")
+    {
+        printf '[\n'
+        local i
+        for (( i=0; i<${#entries[@]}; i++ )); do
+            if (( i < ${#entries[@]} - 1 )); then
+                printf '%s,\n' "${entries[$i]}"
+            else
+                printf '%s\n' "${entries[$i]}"
+            fi
+        done
+        printf ']\n'
+    } > "${manifest_path}"
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -183,11 +217,19 @@ main() {
     mkdir -p "${artifacts_dir}"
     printf '[INFO] Artifacts directory: %s\n' "${artifacts_dir}"
 
+    # Every created server is appended here immediately — if provisioning
+    # aborts mid-run, this file lists what needs manual teardown.
+    CREATED_SERVERS_LOG="${artifacts_dir}/created-servers.log"
+    : > "${CREATED_SERVERS_LOG}"
+
     # Split comma-separated image list
     local images_array=()
     IFS=',' read -ra images_array <<< "${HETZNER_IMAGES}"
 
-    # Provision each image and collect results
+    # Provision each image and collect results. The manifest is REWRITTEN
+    # after every successful server so a mid-run failure leaves a usable
+    # servers.json for teardown of the servers created so far.
+    local manifest_path="${artifacts_dir}/servers.json"
     local json_entries=()
     local image
     for image in "${images_array[@]}"; do
@@ -212,22 +254,9 @@ main() {
             printf '  {\n    "id": %s,\n    "name": "%s",\n    "ip": "%s",\n    "image": "%s",\n    "build_id": "%s"\n  }' \
                 "${srv_id}" "${srv_name}" "${srv_ip}" "${srv_image}" "${BUILD_ID}"
         )")
-    done
 
-    # Assemble servers.json manifest as a proper JSON array
-    local manifest_path="${artifacts_dir}/servers.json"
-    {
-        printf '[\n'
-        local i
-        for (( i=0; i<${#json_entries[@]}; i++ )); do
-            if (( i < ${#json_entries[@]} - 1 )); then
-                printf '%s,\n' "${json_entries[$i]}"
-            else
-                printf '%s\n' "${json_entries[$i]}"
-            fi
-        done
-        printf ']\n'
-    } > "${manifest_path}"
+        write_manifest "${manifest_path}" "${json_entries[@]}"
+    done
 
     printf '\n[INFO] Manifest written: %s\n' "${manifest_path}"
     printf '[INFO] BUILD_ID: %s\n' "${BUILD_ID}"

@@ -56,18 +56,15 @@ LockPersonality=yes
 SystemCallArchitectures=native
 EOF
             ;;
-        cron)
+        cron|crond|atd)
+            # SESSION-SAFE PROFILE ONLY (same reasoning as ssh): every cron/at
+            # job inherits the daemon's mount namespace. ProtectSystem=full
+            # breaks jobs writing /etc (certbot renew, apt conffiles),
+            # ProtectHome breaks user crontabs, PrivateTmp breaks handing
+            # files to other services via /tmp — all silently.
             cat <<'EOF'
 [Service]
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=yes
 NoNewPrivileges=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
 RestrictRealtime=yes
 LockPersonality=yes
 SystemCallArchitectures=native
@@ -277,7 +274,7 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 EOF
             ;;
-        sshd-keygen|sshd@sshd-keygen)
+        sshd-keygen|sshd-keygen@*)
             # One-shot key generation — can be heavily sandboxed
             cat <<'EOF'
 [Service]
@@ -300,23 +297,6 @@ LockPersonality=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 ReadWritePaths=/etc/ssh
-EOF
-            ;;
-        atd)
-            cat <<'EOF'
-[Service]
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=yes
-NoNewPrivileges=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictRealtime=yes
-LockPersonality=yes
-SystemCallArchitectures=native
 EOF
             ;;
         acpid)
@@ -465,24 +445,6 @@ RestrictAddressFamilies=AF_UNIX
 ReadWritePaths=/run/resolvconf /etc/resolv.conf
 EOF
             ;;
-        crond)
-            # RHEL name for cron — same policy as cron
-            cat <<'EOF'
-[Service]
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=yes
-NoNewPrivileges=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictRealtime=yes
-LockPersonality=yes
-SystemCallArchitectures=native
-EOF
-            ;;
         *)
             # Generic hardening for services without special requirements
             printf '[Service]\n'
@@ -497,6 +459,7 @@ EOF
 
 readonly -a _SYSHARDEN_SERVICES=(
     ssh
+    sshd
     cron
     crond
     fail2ban
@@ -509,7 +472,7 @@ readonly -a _SYSHARDEN_SERVICES=(
     systemd-rfkill
     systemd-initctl
     systemd-bsod
-    sshd@sshd-keygen
+    sshd-keygen
     atd
     acpid
     "getty@tty1"

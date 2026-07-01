@@ -14,7 +14,7 @@ SSH_KEY_PATH=""
 PASSPHRASE=""
 SERVER_TYPE=""
 LOCATION=""
-DISKS="auto"
+DISKS=""   # empty: fall back to LUKS_DISKS from config, then "auto"
 RAID_LEVEL=""
 RAID_CHUNK=""
 FILESYSTEM=""
@@ -88,7 +88,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)          usage ;;
         *)
             printf 'ERROR: Unknown option: %s\n' "$1" >&2
-            usage
+            exit 1
             ;;
     esac
     shift
@@ -291,29 +291,46 @@ main() {
 
     printf '[5/10] Running LUKS engine...\n'
 
-    _rescue_ssh bash -c "$(printf '
-        export ENGINE_DISKS=%q
-        export ENGINE_RAID_LEVEL=%q
-        export ENGINE_RAID_CHUNK=%q
-        export ENGINE_FILESYSTEM=%q
-        export ENGINE_BOOT_SIZE=%q
-        export ENGINE_EFI_SIZE=%q
-        export ENGINE_CIPHER=%q
-        export ENGINE_KEY_SIZE=%q
-        export ENGINE_DISTRO=%q
-        export ENGINE_SSH_PUBKEY=%q
-        export ENGINE_DROPBEAR_PORT=%q
-        export ENGINE_PROVISION_USER=%q
-        export ENGINE_PASSPHRASE=%q
-        export ENGINE_DRY_RUN=%q
-        bash /tmp/engine.sh
-    ' "${DISKS}" "${RAID_LEVEL}" "${RAID_CHUNK}" "${FILESYSTEM}" \
+    # Ship the engine environment as a 0600 file and the passphrase over
+    # stdin: embedding them in the ssh command line exposes the passphrase in
+    # `ps`/`/proc/*/cmdline` on both machines for the whole engine run.
+    local engine_env
+    engine_env="$(mktemp)"
+    printf 'export ENGINE_DISKS=%q
+export ENGINE_RAID_LEVEL=%q
+export ENGINE_RAID_CHUNK=%q
+export ENGINE_FILESYSTEM=%q
+export ENGINE_BOOT_SIZE=%q
+export ENGINE_EFI_SIZE=%q
+export ENGINE_CIPHER=%q
+export ENGINE_KEY_SIZE=%q
+export ENGINE_DISTRO=%q
+export ENGINE_SSH_PUBKEY=%q
+export ENGINE_DROPBEAR_PORT=%q
+export ENGINE_PROVISION_USER=%q
+export ENGINE_DRY_RUN=%q
+' \
+      "${DISKS}" "${RAID_LEVEL}" "${RAID_CHUNK}" "${FILESYSTEM}" \
       "${LUKS_BOOT_SIZE:-512}" "${LUKS_EFI_SIZE:-256}" \
       "${LUKS_CIPHER:-aes-xts-plain64}" "${LUKS_KEY_SIZE:-512}" \
       "${IMAGE}" "${DROPBEAR_PUBKEY}" "${DROPBEAR_PORT}" \
-      "${PROVISION_USER}" "${PASSPHRASE}" "${DRY_RUN}")" \
-        2>&1 | tee "${ARTIFACTS_DIR}/provision.log"
-    local engine_rc=${PIPESTATUS[0]}
+      "${PROVISION_USER}" "${DRY_RUN}" > "${engine_env}"
+    _rescue_scp_to "${engine_env}" "/root/.engine-env"
+    rm -f "${engine_env}"
+
+    printf '%s' "${PASSPHRASE}" | _rescue_ssh 'umask 077 && cat > /root/.engine-passphrase'
+
+    # Guarded pipeline: under set -euo pipefail an unguarded failure here
+    # would kill the script BEFORE the status-file recheck below runs.
+    local engine_rc=0
+    _rescue_ssh 'source /root/.engine-env
+        ENGINE_PASSPHRASE="$(cat /root/.engine-passphrase)"
+        export ENGINE_PASSPHRASE
+        bash /tmp/engine.sh
+        rc=$?
+        rm -f /root/.engine-passphrase /root/.engine-env
+        exit ${rc}' \
+        2>&1 | tee "${ARTIFACTS_DIR}/provision.log" || engine_rc=${PIPESTATUS[0]}
 
     # Engine SSH may return non-zero if connection drops during finalize (unmount/close)
     # Check the status file on the server to determine if engine actually succeeded

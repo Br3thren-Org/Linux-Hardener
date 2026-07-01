@@ -42,8 +42,11 @@ Summary JSON schema (produced by lynis_parser.py):
     }
 """
 
+from __future__ import annotations
+
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,8 +90,9 @@ INTENTIONALLY_NOT_REMEDIATED = [
     ),
     (
         "Full disk encryption (LUKS)",
-        "Requires console access to enter the passphrase on every boot. "
-        "Incompatible with fully automated cloud reboots and Hetzner's provisioning model.",
+        "Not applied by the default hardening run. Available separately via the "
+        "optional LUKS module (LUKS_ENABLED=yes in config/luks.conf) or "
+        "luks/provision-encrypted.sh with Dropbear remote unlock.",
     ),
     (
         "AppArmor enforcing mode (Debian/Ubuntu)",
@@ -102,8 +106,9 @@ INTENTIONALLY_NOT_REMEDIATED = [
     ),
     (
         "Bootloader password",
-        "Breaks Hetzner's cloud console and prevents automated reboots. "
-        "Physical security of the boot process is the cloud provider's responsibility.",
+        "Not applied unless ENABLE_GRUB_PASSWORD=true (default in the aggressive "
+        "profile). When enabled it only protects EDITING boot entries; unattended "
+        "booting is verified to keep working.",
     ),
 ]
 
@@ -180,15 +185,24 @@ def _na(value) -> str:
     return str(value) if value is not None else "N/A"
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _sanitize(text: str) -> str:
+    """Strip control/escape characters — finding text originates on the
+    audited host and could otherwise smuggle ANSI sequences into the report."""
+    return _CONTROL_CHARS.sub("", text)
+
+
 def _item_id(item: dict | str) -> str:
     """Return a short display identifier for a finding item."""
     if isinstance(item, dict):
-        tid = item.get("test_id", "")
-        desc = item.get("description", "")
+        tid = _sanitize(str(item.get("test_id", "")))
+        desc = _sanitize(str(item.get("description", "")))
         if tid and desc:
             return f"{tid}: {desc}"
-        return tid or desc or str(item)
-    return str(item)
+        return tid or desc or _sanitize(str(item))
+    return _sanitize(str(item))
 
 
 # ---------------------------------------------------------------------------

@@ -44,8 +44,6 @@ readonly -a SYSCTL_SETTINGS=(
     "kernel.perf_event_paranoid=3"
     "kernel.unprivileged_bpf_disabled=1"
     "net.core.bpf_jit_harden=2"
-    "net.ipv6.conf.default.accept_ra=0"
-    "net.ipv6.conf.all.accept_ra=0"
     # Filesystem hardening — protect FIFOs/regular files in world-writable dirs
     "fs.protected_fifos=2"
     "fs.protected_regular=2"
@@ -66,6 +64,18 @@ _get_conditional_settings() {
 
     if [[ "${RESTRICT_KPTR:-false}" == "true" ]]; then
         extras+=("kernel.kptr_restrict=2")
+    fi
+
+    # accept_ra=0 stops refreshing SLAAC/RA-learned routes: on a host whose
+    # IPv6 default route came from Router Advertisements, the route expires
+    # after apply and IPv6 connectivity silently dies — a delayed lockout on
+    # IPv6-only management paths. Only disable RA when the current IPv6
+    # config does not depend on it. (log to stderr: stdout is the value list)
+    if ip -6 route show default 2>/dev/null | grep -q 'proto ra'; then
+        log_warn "sysctl: IPv6 default route is RA-learned — keeping accept_ra enabled to preserve IPv6 connectivity" >&2
+    else
+        extras+=("net.ipv6.conf.default.accept_ra=0")
+        extras+=("net.ipv6.conf.all.accept_ra=0")
     fi
 
     local entry

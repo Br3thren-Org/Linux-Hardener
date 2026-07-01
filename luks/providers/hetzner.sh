@@ -28,7 +28,7 @@ _hetzner_api() {
 # provider_create_server <name> <type> <image> <location> <ssh_key_name>
 provider_create_server() {
     local name="${1}"
-    local server_type="${2:-cx22}"
+    local server_type="${2:-cx23}"
     local image="${3}"
     local location="${4:-fsn1}"
     local ssh_key_name="${5:-}"
@@ -38,15 +38,22 @@ provider_create_server() {
         return 1
     fi
 
+    # Omit ssh_keys entirely when no name was given — [""] is rejected by
+    # the API as an unknown key and creation fails.
+    local ssh_keys_field=""
+    if [[ -n "${ssh_key_name}" ]]; then
+        ssh_keys_field="$(printf '"ssh_keys": ["%s"],' "${ssh_key_name}")"
+    fi
+
     local payload
     payload="$(printf '{
         "name": "%s",
         "server_type": "%s",
         "image": "%s",
         "location": "%s",
-        "ssh_keys": ["%s"],
+        %s
         "start_after_create": true
-    }' "${name}" "${server_type}" "${image}" "${location}" "${ssh_key_name}")"
+    }' "${name}" "${server_type}" "${image}" "${location}" "${ssh_keys_field}")"
 
     local response
     response="$(_hetzner_api POST /servers "${payload}")" || return 1

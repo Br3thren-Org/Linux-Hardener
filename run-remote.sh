@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)      usage ;;
         *)
             printf 'ERROR: Unknown option: %s\n' "$1" >&2
-            usage
+            exit 1
             ;;
     esac
     shift
@@ -84,7 +84,7 @@ done
 
 if [[ -z "${HOST}" ]]; then
     printf 'ERROR: --host is required\n' >&2
-    usage
+    exit 1
 fi
 
 if [[ ! -f "${SSH_KEY_PATH}" ]]; then
@@ -297,10 +297,22 @@ fi
 printf '[2/8] Copying framework to target...\n'
 remote_exec mkdir -p "${REMOTE_DIR}"
 remote_exec chown "${USER}:${USER}" "${REMOTE_DIR}"
+
+# Stage a sanitized copy of config/: HETZNER_* values (API token, key name)
+# are control-machine credentials and must never land on the target.
+STAGED_CONFIG_DIR="$(mktemp -d)"
+trap 'rm -rf "${STAGED_CONFIG_DIR}"' EXIT
+cp -R "${SCRIPT_DIR}/config/." "${STAGED_CONFIG_DIR}/"
+for staged_conf in "${STAGED_CONFIG_DIR}"/*.conf "${STAGED_CONFIG_DIR}"/*.conf.example; do
+    [[ -f "${staged_conf}" ]] || continue
+    grep -v '^HETZNER_' "${staged_conf}" > "${staged_conf}.sanitized" || true
+    mv "${staged_conf}.sanitized" "${staged_conf}"
+done
+
 remote_copy_to "${SCRIPT_DIR}/lib/"      "${REMOTE_DIR}/lib"
 remote_copy_to "${SCRIPT_DIR}/modules/"  "${REMOTE_DIR}/modules"
 remote_copy_to "${SCRIPT_DIR}/scripts/"  "${REMOTE_DIR}/scripts"
-remote_copy_to "${SCRIPT_DIR}/config/"   "${REMOTE_DIR}/config"
+remote_copy_to "${STAGED_CONFIG_DIR}/"   "${REMOTE_DIR}/config"
 remote_copy_to "${SCRIPT_DIR}/harden.sh" "${REMOTE_DIR}/harden.sh"
 remote_exec chmod +x "${REMOTE_DIR}/harden.sh" "${REMOTE_DIR}/scripts/lynis_runner.sh" "${REMOTE_DIR}/scripts/validate.sh"
 
@@ -335,14 +347,25 @@ if [[ -n "${MODULE_FILTER}" ]]; then
     harden_args+=("--modules" "${MODULE_FILTER}")
 fi
 
-remote_exec "${harden_args[@]}" 2>&1 | tee "${ARTIFACTS_DIR}/harden.log"
+# Guarded: harden.sh exits 1 by design when any module fails — that must not
+# abort this script before validation/Lynis/artifact collection run. The
+# failure is propagated via the final exit code instead.
+HARDEN_RC=0
+remote_exec "${harden_args[@]}" 2>&1 | tee "${ARTIFACTS_DIR}/harden.log" || HARDEN_RC=$?
+if [[ ${HARDEN_RC} -ne 0 ]]; then
+    printf '  WARN: hardener exited with code %d — continuing to collect diagnostics.\n' "${HARDEN_RC}"
+fi
 printf '\n'
 
 # ─── Step 5: Validation ─────────────────────────────────────────────────────
 
+VALIDATE_RC=0
 if [[ "${RUN_VALIDATION}" == "true" ]] && [[ "${MODE}" == "apply" ]]; then
     printf '[5/8] Running post-hardening validation...\n'
-    remote_exec "${REMOTE_DIR}/scripts/validate.sh" 2>&1 | tee "${ARTIFACTS_DIR}/validate.log"
+    remote_exec "${REMOTE_DIR}/scripts/validate.sh" 2>&1 | tee "${ARTIFACTS_DIR}/validate.log" || VALIDATE_RC=$?
+    if [[ ${VALIDATE_RC} -ne 0 ]]; then
+        printf '  WARN: validation exited with code %d.\n' "${VALIDATE_RC}"
+    fi
     printf '\n'
 else
     printf '[5/8] Skipping validation (%s mode).\n\n' "${MODE}"
@@ -363,8 +386,22 @@ fi
 if [[ "${COLLECT_ARTIFACTS}" == "true" ]]; then
     printf '[7/8] Collecting artifacts...\n'
 
-    remote_exec "${REMOTE_DIR}/scripts/lynis_runner.sh" collect /tmp/hardener-artifacts &>/dev/null || true
-    remote_copy_from "/tmp/hardener-artifacts/" "${ARTIFACTS_DIR}/lynis/" 2>/dev/null || true
+    # Root-owned unpredictable path — a fixed /tmp name could be pre-created
+    # (or symlinked) by an unprivileged local user on a multi-user target.
+    REMOTE_COLLECT_DIR="$(remote_exec_script 2>/dev/null <<'COLLECT_EOF' | tail -1 | tr -d '[:space:]'
+mkdir -p /var/lib/linux-hardener
+mktemp -d /var/lib/linux-hardener/collect.XXXXXX
+COLLECT_EOF
+)" || REMOTE_COLLECT_DIR=""
+    if [[ -n "${REMOTE_COLLECT_DIR}" ]]; then
+        remote_exec "${REMOTE_DIR}/scripts/lynis_runner.sh" collect "${REMOTE_COLLECT_DIR}" &>/dev/null || true
+        # scp runs as ${USER}: make the root-created artifacts readable
+        remote_exec chown -R "${USER}:" "${REMOTE_COLLECT_DIR}" 2>/dev/null || true
+        remote_copy_from "${REMOTE_COLLECT_DIR}/" "${ARTIFACTS_DIR}/lynis/" 2>/dev/null || true
+        remote_exec rm -rf "${REMOTE_COLLECT_DIR}" 2>/dev/null || true
+    else
+        printf '  WARN: could not create remote collection directory — skipping Lynis artifact copy.\n'
+    fi
     remote_copy_from "/var/lib/linux-hardener/last-run.json" "${ARTIFACTS_DIR}/" 2>/dev/null || true
     remote_copy_from "/var/lib/linux-hardener/validation.json" "${ARTIFACTS_DIR}/" 2>/dev/null || true
 
@@ -373,8 +410,9 @@ if [[ "${COLLECT_ARTIFACTS}" == "true" ]]; then
     local_post="${ARTIFACTS_DIR}/lynis/post-hardening/lynis-report.dat"
 
     if [[ -f "${local_pre}" ]] && [[ -f "${local_post}" ]]; then
-        # Detect remote distro for labeling
-        local distro_label
+        # Detect remote distro for labeling.
+        # (No `local` here — this is top-level script code, not a function;
+        # `local` would error and abort under set -e.)
         distro_label="$(remote_exec_raw "sed -n 's/^ID=//p' /etc/os-release | tr -d '\"'")-$(remote_exec_raw "sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '\"'")" 2>/dev/null || distro_label="unknown"
 
         python3 "${SCRIPT_DIR}/scripts/lynis_parser.py" \
@@ -423,3 +461,13 @@ if [[ -n "${PROVISION_USER}" ]]; then
 fi
 
 printf '════════════════════════════════════════════════════════════\n'
+
+# Propagate hardening/validation failures so CI callers see them
+if [[ ${HARDEN_RC} -ne 0 ]]; then
+    printf 'Hardening reported failures (exit %d) — see %s/harden.log\n' "${HARDEN_RC}" "${ARTIFACTS_DIR}" >&2
+    exit "${HARDEN_RC}"
+fi
+if [[ ${VALIDATE_RC} -ne 0 ]]; then
+    printf 'Validation reported failures (exit %d) — see %s/validate.log\n' "${VALIDATE_RC}" "${ARTIFACTS_DIR}" >&2
+    exit "${VALIDATE_RC}"
+fi

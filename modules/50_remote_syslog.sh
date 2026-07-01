@@ -8,22 +8,59 @@
 # (journald persistence is handled by the logging module) is never blocked.
 # Sourced by harden.sh. Do NOT add set -euo pipefail here.
 
-: "${RSYSLOG_REMOTE_HOST:=}"        # host:port — empty disables the module
+: "${RSYSLOG_REMOTE_HOST:=}"        # host:port (IPv6: [addr]:port) — empty disables the module
 : "${RSYSLOG_REMOTE_PROTOCOL:=tcp}" # tcp | tls
 : "${RSYSLOG_REMOTE_CERT:=}"        # CA cert for tls
+: "${RSYSLOG_REMOTE_PERMITTED_PEER:=}"  # TLS peer name to verify (default: the host)
 
 readonly RSYSLOG_REMOTE_CONF="/etc/rsyslog.d/99-hardener-remote.conf"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-_rsl_host() { printf '%s' "${RSYSLOG_REMOTE_HOST%%:*}"; }
+# Host/port parsing understands "host", "host:port", "[v6addr]" and
+# "[v6addr]:port". A bare IPv6 literal (two or more colons, no brackets)
+# is rejected in apply — naive colon-splitting would mangle it.
+_rsl_host() {
+    local h="${RSYSLOG_REMOTE_HOST}"
+    if [[ "${h}" == \[*\]* ]]; then
+        h="${h%%]*}"
+        h="${h#[}"
+    else
+        h="${h%%:*}"
+    fi
+    printf '%s' "${h}"
+}
+
+# _rsl_explicit_port — the port the user configured, or empty
+_rsl_explicit_port() {
+    local h="${RSYSLOG_REMOTE_HOST}"
+    if [[ "${h}" == \[*\]:* ]]; then
+        printf '%s' "${h##*]:}"
+    elif [[ "${h}" != \[* && "${h}" == *:* && "${h#*:}" != *:* ]]; then
+        printf '%s' "${h##*:}"
+    fi
+}
+
 _rsl_port() {
-    local port="${RSYSLOG_REMOTE_HOST##*:}"
-    if [[ "${port}" == "${RSYSLOG_REMOTE_HOST}" || -z "${port}" ]]; then
+    local port
+    port="$(_rsl_explicit_port)"
+    if [[ -z "${port}" ]]; then
         # No port given — protocol default
         [[ "${RSYSLOG_REMOTE_PROTOCOL}" == "tls" ]] && port=6514 || port=514
     fi
     printf '%s' "${port}"
+}
+
+# _rsl_target_host — host as it must appear in the rsyslog action line
+# (IPv6 literals need brackets there too)
+_rsl_target_host() {
+    local h
+    h="$(_rsl_host)"
+    if [[ "${h}" == *:* ]]; then
+        printf '[%s]' "${h}"
+    else
+        printf '%s' "${h}"
+    fi
 }
 
 # _rsl_build_conf — print the rsyslog forwarding config
@@ -40,11 +77,17 @@ _rsl_build_conf() {
 EOF
 
     if [[ "${RSYSLOG_REMOTE_PROTOCOL}" == "tls" ]]; then
+        # x509/name + PermittedPeer: certvalid alone accepts ANY certificate
+        # signed by the CA — no peer binding, trivially MITM-able with a
+        # shared/public CA. Override the peer name via
+        # RSYSLOG_REMOTE_PERMITTED_PEER when it differs from the host.
+        local peer="${RSYSLOG_REMOTE_PERMITTED_PEER:-${host}}"
         cat <<EOF
 \$DefaultNetstreamDriverCAFile ${RSYSLOG_REMOTE_CERT}
 \$DefaultNetstreamDriver gtls
 \$ActionSendStreamDriverMode 1
-\$ActionSendStreamDriverAuthMode x509/certvalid
+\$ActionSendStreamDriverAuthMode x509/name
+\$ActionSendStreamDriverPermittedPeer ${peer}
 EOF
     fi
 
@@ -54,7 +97,7 @@ EOF
 \$ActionQueueMaxDiskSpace 100m
 \$ActionQueueSaveOnShutdown on
 \$ActionResumeRetryCount -1
-auth,authpriv.*;kern.*;*.warn @@${host}:${port}
+auth,authpriv.*;kern.*;*.warn @@$(_rsl_target_host):${port}
 EOF
 }
 
@@ -96,6 +139,13 @@ remote_syslog_apply() {
     if [[ -z "${RSYSLOG_REMOTE_HOST}" ]]; then
         log_info "remote_syslog: disabled (RSYSLOG_REMOTE_HOST not set) — skipping"
         return 2
+    fi
+
+    # Bare IPv6 literals are ambiguous with host:port splitting
+    if [[ "${RSYSLOG_REMOTE_HOST}" != \[* && "${RSYSLOG_REMOTE_HOST}" == *:*:* ]]; then
+        log_error "remote_syslog: RSYSLOG_REMOTE_HOST looks like a bare IPv6 literal — use bracketed form: [addr] or [addr]:port"
+        (( CHANGES_FAILED++ )) || true
+        return 1
     fi
 
     case "${RSYSLOG_REMOTE_PROTOCOL}" in
@@ -198,10 +248,15 @@ _rsl_journal_upload_fallback() {
     mkdir -p /etc/systemd/journal-upload.conf.d
     local scheme="http"
     [[ "${RSYSLOG_REMOTE_PROTOCOL}" == "tls" ]] && scheme="https"
+    # systemd-journal-remote listens on 19532 (HTTP), NOT the syslog ports —
+    # only reuse a port the operator configured explicitly.
+    local upload_port
+    upload_port="$(_rsl_explicit_port)"
+    upload_port="${upload_port:-19532}"
     cat > /etc/systemd/journal-upload.conf.d/99-hardener.conf <<EOF
 # Managed by linux-hardener — do not edit by hand
 [Upload]
-URL=${scheme}://$(_rsl_host):$(_rsl_port)
+URL=${scheme}://$(_rsl_target_host):${upload_port}
 EOF
     if [[ "${RSYSLOG_REMOTE_PROTOCOL}" == "tls" ]]; then
         printf 'TrustedCertificateFile=%s\n' "${RSYSLOG_REMOTE_CERT}" \
@@ -209,7 +264,7 @@ EOF
     fi
 
     if systemctl enable --now systemd-journal-upload.service 2>/dev/null; then
-        log_success "remote_syslog: journal upload active to $(_rsl_host):$(_rsl_port)"
+        log_success "remote_syslog: journal upload active to $(_rsl_target_host):${upload_port}"
         (( CHANGES_APPLIED++ )) || true
         return 0
     fi

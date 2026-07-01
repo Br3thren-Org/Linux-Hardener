@@ -368,7 +368,20 @@ _luks_vps_swap() {
 
     # 3. crypttab entry: 'swap' option re-formats with a fresh random key each
     #    boot; systemd-cryptsetup loop-attaches file sources automatically.
-    _luks_crypttab_add "cryptswap" "${swap_src}" "/dev/urandom" \
+    #    For a dedicated device, record a STABLE identifier: /dev/sdX names
+    #    shuffle across reboots and the swap option would mkswap-destroy
+    #    whatever disk ends up at the recorded path.
+    local swap_ref="${swap_src}"
+    if [[ "${swap_src}" == /dev/* ]]; then
+        local stable_ref
+        stable_ref="$(find -L /dev/disk/by-id -maxdepth 1 -samefile "${swap_src}" 2>/dev/null | sort | head -1)"
+        if [[ -n "${stable_ref}" ]]; then
+            swap_ref="${stable_ref}"
+        else
+            log_warn "luks: no /dev/disk/by-id alias for ${swap_src} — crypttab will use the raw path (renames across reboots would destroy the wrong device)"
+        fi
+    fi
+    _luks_crypttab_add "cryptswap" "${swap_ref}" "/dev/urandom" \
         "swap,cipher=aes-xts-plain64,size=512,sector-size=4096" || return 1
 
     backup_file /etc/fstab

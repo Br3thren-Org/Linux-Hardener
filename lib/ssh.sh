@@ -47,6 +47,17 @@ _ssh_check_setting() {
     return 1
 }
 
+# _ssh_any_authorized_keys — does any login-capable account have a non-empty
+# authorized_keys file? Heuristic lockout guard for PasswordAuthentication no.
+_ssh_any_authorized_keys() {
+    [[ -s /root/.ssh/authorized_keys ]] && return 0
+    local keys
+    for keys in /home/*/.ssh/authorized_keys; do
+        [[ -s "${keys}" ]] && return 0
+    done
+    return 1
+}
+
 # _ssh_ensure_access_group — create the SSH access group and add all
 # non-system users with a valid login shell + root to it.
 _ssh_ensure_access_group() {
@@ -159,6 +170,15 @@ ssh_apply() {
         _ssh_ensure_access_group "${ssh_group}"
     fi
 
+    # --- Lockout guard: disabling password auth on a box where NO account
+    # has an authorized_keys file cuts off every future login ---
+    local password_auth="${SSH_PASSWORD_AUTH:-no}"
+    if [[ "${password_auth}" == "no" ]] && ! _ssh_any_authorized_keys; then
+        log_error "ssh_apply: SSH_PASSWORD_AUTH=no requested but no user has an authorized_keys file — keeping password authentication enabled to avoid lockout"
+        password_auth="yes"
+        (( AUDIT_FINDINGS++ )) || true
+    fi
+
     # --- Build drop-in config content ---
     local dropin_content
     dropin_content="$(cat <<EOF
@@ -167,7 +187,7 @@ ssh_apply() {
 # To customise, adjust the config variables and re-run harden.sh --apply.
 
 PermitRootLogin ${SSH_PERMIT_ROOT_LOGIN:-prohibit-password}
-PasswordAuthentication ${SSH_PASSWORD_AUTH:-no}
+PasswordAuthentication ${password_auth}
 KbdInteractiveAuthentication no
 MaxAuthTries 3
 LoginGraceTime 30
@@ -230,10 +250,12 @@ AllowGroups ${ssh_group}"
     fi
 
     log_info "ssh_apply: validating configuration with 'sshd -t'"
+    local validate_err
+    validate_err="$(mktemp)"
     local validate_ok="false"
     local attempt
     for attempt in 1 2 3; do
-        if sshd -t 2>/tmp/sshd_validate_err; then
+        if sshd -t 2>"${validate_err}"; then
             validate_ok="true"
             break
         fi
@@ -242,7 +264,8 @@ AllowGroups ${ssh_group}"
     done
     if [[ "${validate_ok}" != "true" ]]; then
         local err_output
-        err_output="$(cat /tmp/sshd_validate_err)"
+        err_output="$(cat "${validate_err}")"
+        rm -f "${validate_err}"
         log_error "ssh_apply: sshd -t validation FAILED — reverting drop-in"
         log_error "sshd validation error: ${err_output}"
 
@@ -253,6 +276,7 @@ AllowGroups ${ssh_group}"
         (( CHANGES_FAILED++ )) || true
         return 1
     fi
+    rm -f "${validate_err}"
     log_info "ssh_apply: configuration validated successfully"
 
     # --- Reload sshd ---
@@ -268,6 +292,17 @@ AllowGroups ${ssh_group}"
         (( CHANGES_FAILED++ )) || true
         return 1
     }
+
+    # Verify the drop-in actually took effect: sshd keeps the FIRST value it
+    # sees per keyword, so a directive set in sshd_config ABOVE the Include
+    # silently overrides the drop-in.
+    local effective_pw
+    effective_pw="$(_ssh_get_effective_value "passwordauthentication")"
+    if [[ -n "${effective_pw}" && "${effective_pw}" != "${password_auth}" ]]; then
+        log_error "ssh_apply: drop-in is not effective — sshd -T reports passwordauthentication=${effective_pw} (expected ${password_auth}); a directive above the Include in ${SSH_MAIN_CONFIG} wins"
+        (( CHANGES_FAILED++ )) || true
+        return 1
+    fi
 
     log_success "ssh_apply: sshd reloaded with hardened configuration"
     return 0
