@@ -724,7 +724,10 @@ _auth_apply_grub_password() {
     local grub_password="${GRUB_PASSWORD:-}"
     local generated=false
     if [[ -z "${grub_password}" ]]; then
-        grub_password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+        # Bounded read + slice — `tr < /dev/urandom | head -c N` SIGPIPEs tr
+        # (works here only because set -e is suppressed inside modules).
+        grub_password="$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+        grub_password="${grub_password:0:32}"
         generated=true
     fi
 

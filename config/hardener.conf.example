@@ -19,6 +19,11 @@ DRY_RUN="no"
 # SSH
 # -----------------------------------------------------------------------------
 SSH_PORT=22
+# SSH_PERMIT_ROOT_LOGIN: prohibit-password (root key only, no password) |
+#   no (root SSH fully disabled) | yes. "no" is applied only when a non-root
+#   account has BOTH an SSH key and sudo/wheel membership — otherwise the SSH
+#   module keeps prohibit-password to avoid locking you out. run-remote.sh
+#   --admin-user sets this up and disables root SSH for you.
 SSH_PERMIT_ROOT_LOGIN="prohibit-password"
 SSH_PASSWORD_AUTH="no"
 SSH_ALLOW_TCP_FORWARDING="no"
