@@ -58,8 +58,13 @@ _sshc_supports() {
     probe="$(mktemp)"
     printf '%s\n' "${directive}" > "${probe}"
     local rc=0
-    # Validate the directive in isolation against a minimal config
-    if sshd -t -f "${probe}" 2>&1 | grep -qiE 'bad configuration|unsupported|unknown'; then
+    # Validate the directive in isolation against a minimal config.
+    # Capture first: under pipefail `sshd | grep -q` returns sshd's nonzero
+    # exit even when grep matches, inverting the result on exactly the old
+    # sshd versions this probe exists for.
+    local out
+    out="$(sshd -t -f "${probe}" 2>&1 || true)"
+    if grep -qiE 'bad configuration|unsupported|unknown' <<< "${out}"; then
         rc=1
     fi
     rm -f "${probe}"
@@ -111,12 +116,13 @@ _sshc_handshake_probe() {
         log_debug "ssh_crypto: handshake probe OK (negotiation succeeded, auth denied as expected)"
         return 0
     fi
-    if grep -qiE 'connection refused|timed out|connection closed by remote host before' <<< "${out}"; then
+    if grep -qiE 'connection refused|timed out|connection closed by remote host before|connection reset|kex_exchange_identification' <<< "${out}"; then
         log_error "ssh_crypto: handshake probe could not connect: $(head -1 <<< "${out}")"
         return 1
     fi
-    # Unexpected success or unknown output — treat connectivity as proven
-    log_debug "ssh_crypto: handshake probe output: $(head -1 <<< "${out}")"
+    # Unexpected success or unknown output — treat connectivity as proven,
+    # but say so loudly since this path has not actually verified negotiation
+    log_warn "ssh_crypto: handshake probe returned unrecognized output (treating as pass): $(head -1 <<< "${out}")"
     return 0
 }
 
@@ -203,7 +209,7 @@ ssh_crypto_apply() {
     if [[ "${DRY_RUN:-no}" == "yes" ]] || ! should_write; then
         log_info "[DRY-RUN] Would write ${SSH_CRYPTO_DROPIN}:"
         log_info "${content}"
-        [[ "${DISTRO_FAMILY}" == "rhel" ]] && \
+        [[ "${SSH_CRYPTO_SYSTEM_POLICY}" == "yes" && "${DISTRO_FAMILY}" == "rhel" ]] && \
             log_info "[DRY-RUN] Would raise system-wide crypto policy to FUTURE (update-crypto-policies)"
         return 0
     fi
@@ -256,15 +262,17 @@ ssh_crypto_apply() {
         return 2
     fi
 
-    if ! sshd -t 2>/tmp/.sshc-err; then
+    local sshc_err
+    sshc_err="$(mktemp)"
+    if ! sshd -t 2>"${sshc_err}"; then
         log_error "ssh_crypto: sshd -t rejected the new configuration:"
-        while IFS= read -r line; do log_error "ssh_crypto:   ${line}"; done < /tmp/.sshc-err
-        rm -f /tmp/.sshc-err "${SSH_CRYPTO_DROPIN}"
+        while IFS= read -r line; do log_error "ssh_crypto:   ${line}"; done < "${sshc_err}"
+        rm -f "${sshc_err}" "${SSH_CRYPTO_DROPIN}"
         log_error "ssh_crypto: drop-in removed — sshd untouched"
         (( CHANGES_FAILED++ )) || true
         return 1
     fi
-    rm -f /tmp/.sshc-err
+    rm -f "${sshc_err}"
 
     log_change \
         "SSH crypto policy: ${SSH_CRYPTO_DROPIN} (kex/ciphers/MACs/host keys, LoginGraceTime=${SSH_LOGIN_GRACE_TIME}${SSH_ALLOWED_GROUPS:+, AllowGroups=${SSH_ALLOWED_GROUPS}})" \

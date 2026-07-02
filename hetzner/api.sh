@@ -34,15 +34,22 @@ hetzner_api() {
         curl_args+=(-d "${data}")
     fi
 
-    local raw_output
-    raw_output="$(curl "${curl_args[@]}" "${url}" 2>/dev/null)" || true
+    local raw_output curl_rc=0
+    raw_output="$(curl "${curl_args[@]}" "${url}" 2>/dev/null)" || curl_rc=$?
+
+    if [[ ${curl_rc} -ne 0 ]]; then
+        printf 'ERROR: API %s %s transport failure (curl exit %d)\n' "${method}" "${endpoint}" "${curl_rc}" >&2
+        return 1
+    fi
 
     local http_code
     http_code="$(printf '%s' "${raw_output}" | tail -1)"
     local response
     response="$(printf '%s' "${raw_output}" | sed '$d')"
 
-    if [[ -z "${http_code}" ]] || [[ "${http_code}" -ge 400 ]] 2>/dev/null; then
+    # A non-numeric trailer means a truncated/garbled response — never treat
+    # it as success (e.g. a DELETE that "succeeded" without happening).
+    if [[ ! "${http_code}" =~ ^[0-9]+$ ]] || (( http_code >= 400 )); then
         printf 'ERROR: API %s %s returned HTTP %s: %s\n' "${method}" "${endpoint}" "${http_code:-000}" "${response}" >&2
         return 1
     fi

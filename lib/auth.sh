@@ -449,8 +449,8 @@ _auth_audit_login_defs() {
     fi
 
     local -A expected_vals=(
-        [SHA_CRYPT_MIN_ROUNDS]=5000
-        [SHA_CRYPT_MAX_ROUNDS]=5000
+        [SHA_CRYPT_MIN_ROUNDS]=65536
+        [SHA_CRYPT_MAX_ROUNDS]=65536
         [PASS_MIN_DAYS]=1
         [PASS_MAX_DAYS]=365
         [PASS_WARN_AGE]=14
@@ -505,8 +505,10 @@ _auth_apply_login_defs() {
 
     backup_file "${AUTH_LOGIN_DEFS}"
 
-    _auth_set_login_defs_value "SHA_CRYPT_MIN_ROUNDS" "5000"
-    _auth_set_login_defs_value "SHA_CRYPT_MAX_ROUNDS" "5000"
+    # 65536: 5000 is the glibc minimum/default — the weakest permitted cost
+    # for sha512crypt. (Inert on distros defaulting to yescrypt.)
+    _auth_set_login_defs_value "SHA_CRYPT_MIN_ROUNDS" "65536"
+    _auth_set_login_defs_value "SHA_CRYPT_MAX_ROUNDS" "65536"
     _auth_set_login_defs_value "PASS_MIN_DAYS"        "1"
     _auth_set_login_defs_value "PASS_MAX_DAYS"        "365"
     _auth_set_login_defs_value "PASS_WARN_AGE"        "14"
@@ -602,26 +604,35 @@ EOF
             if ! grep -q "pam_faillock.so" "${pam_auth}" 2>/dev/null; then
                 backup_file "${pam_auth}"
 
-                # Insert faillock preauth before pam_unix and authfail after
+                # Insert the full faillock stack around pam_unix. Only the
+                # stock '[success=1 default=ignore]' layout is handled —
+                # inserted lines shift any other success=N jump target.
+                # authsucc is REQUIRED: without it a successful password
+                # skips authfail and lands on pam_deny, locking out every
+                # password login (su, sudo, console, sshd with PAM).
                 local tmp_pam
                 tmp_pam="$(mktemp)"
 
-                awk '
-                    /^auth.*pam_unix\.so/ && !inserted {
+                if awk '
+                    /^auth[[:space:]]+\[success=1[[:space:]]+default=ignore\][[:space:]]+pam_unix\.so/ && !inserted {
                         print "auth    required                        pam_faillock.so preauth"
                         print $0
                         print "auth    [default=die]                   pam_faillock.so authfail"
+                        print "auth    sufficient                      pam_faillock.so authsucc"
                         inserted=1
                         next
                     }
                     { print }
-                ' "${pam_auth}" > "${tmp_pam}"
-
-                mv "${tmp_pam}" "${pam_auth}"
-                chmod 644 "${pam_auth}"
-
-                log_info "_auth_apply_faillock: pam_faillock added to ${pam_auth}"
-                (( CHANGES_APPLIED++ )) || true
+                    END { exit inserted ? 0 : 1 }
+                ' "${pam_auth}" > "${tmp_pam}"; then
+                    mv "${tmp_pam}" "${pam_auth}"
+                    chmod 644 "${pam_auth}"
+                    log_info "_auth_apply_faillock: pam_faillock added to ${pam_auth}"
+                    (( CHANGES_APPLIED++ )) || true
+                else
+                    rm -f "${tmp_pam}"
+                    log_warn "_auth_apply_faillock: ${pam_auth} lacks the stock '[success=1 default=ignore] pam_unix.so' layout — skipping PAM edit to avoid breaking the auth stack"
+                fi
             else
                 log_debug "_auth_apply_faillock: pam_faillock already in ${pam_auth}"
                 (( CHANGES_SKIPPED++ )) || true
@@ -641,20 +652,33 @@ EOF
     fi
 
     # Enable faillock on RHEL via authselect
-    if [[ "${DISTRO_FAMILY:-}" == "rhel" ]]; then
-        if command -v authselect &>/dev/null; then
-            local current_profile
-            current_profile="$(authselect current -r 2>/dev/null | head -1 || true)"
-            if [[ -n "${current_profile}" ]]; then
-                if ! authselect current 2>/dev/null | grep -q "with-faillock"; then
-                    authselect select "${current_profile}" with-faillock --force 2>/dev/null || {
-                        log_warn "_auth_apply_faillock: authselect with-faillock failed"
-                    }
-                    log_info "_auth_apply_faillock: enabled faillock via authselect"
-                    (( CHANGES_APPLIED++ )) || true
-                else
-                    log_debug "_auth_apply_faillock: faillock already enabled via authselect"
-                fi
+    if [[ "${DISTRO_FAMILY:-}" == "rhel" ]] && command -v authselect &>/dev/null; then
+        if authselect current &>/dev/null; then
+            # A profile is already active — just add the feature (enable-feature
+            # keeps the current profile + its other features, so we don't have
+            # to re-specify them, which is what the old code got wrong).
+            if authselect current 2>/dev/null | grep -q "with-faillock"; then
+                log_debug "_auth_apply_faillock: faillock already enabled via authselect"
+            elif authselect enable-feature with-faillock 2>/dev/null; then
+                log_info "_auth_apply_faillock: enabled faillock feature via authselect"
+                (( CHANGES_APPLIED++ )) || true
+            else
+                log_warn "_auth_apply_faillock: authselect enable-feature with-faillock failed"
+                (( CHANGES_FAILED++ )) || true
+            fi
+        else
+            # No authselect profile is selected — common on minimal cloud
+            # images, where 'authselect current' reports "No existing
+            # configuration detected" (and prints it to stdout, so it must NOT
+            # be treated as a profile name). Adopt the sssd profile: it is the
+            # RHEL default and authenticates local users via pam_unix, so
+            # key-based and local login keep working (verified live).
+            if authselect select sssd with-faillock --force 2>/dev/null; then
+                log_info "_auth_apply_faillock: selected sssd profile with faillock via authselect"
+                (( CHANGES_APPLIED++ )) || true
+            else
+                log_warn "_auth_apply_faillock: authselect select sssd with-faillock failed"
+                (( CHANGES_FAILED++ )) || true
             fi
         fi
     fi
@@ -879,6 +903,25 @@ auth_rollback() {
         log_info "auth_rollback: removed ${AUTH_IPTABLES_CONF}"
     fi
 
+    # GRUB password: restore the edited scripts and regenerate grub.cfg.
+    # /boot/grub2/user.cfg (RHEL) is left in place — we cannot tell a
+    # hardener-written file from a pre-existing one; remove it manually.
+    local grub_restored=false
+    restore_file "/etc/grub.d/40_custom" 2>/dev/null && grub_restored=true
+    restore_file "/etc/grub.d/10_linux" 2>/dev/null && grub_restored=true
+    if [[ "${grub_restored}" == "true" ]]; then
+        if command -v update-grub &>/dev/null; then
+            update-grub 2>/dev/null || log_warn "auth_rollback: update-grub failed after GRUB restore"
+        elif command -v grub2-mkconfig &>/dev/null; then
+            grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null \
+                || log_warn "auth_rollback: grub2-mkconfig failed after GRUB restore"
+        fi
+        log_info "auth_rollback: GRUB password configuration reverted"
+    fi
+    if [[ -s /boot/grub2/user.cfg ]]; then
+        log_warn "auth_rollback: /boot/grub2/user.cfg still present — remove it manually to drop the GRUB password"
+    fi
+
     log_success "auth: rollback complete"
 }
 
@@ -890,7 +933,9 @@ _auth_pwquality_pkg_name() {
         debian) printf 'libpam-pwquality' ;;
         rhel)   printf 'libpwquality'     ;;
         *)
-            log_warn "_auth_pwquality_pkg_name: unknown DISTRO_FAMILY '${DISTRO_FAMILY}', defaulting to libpam-pwquality"
+            # stderr: this function's stdout is command-substituted into a
+            # package name — a log line here would become part of the value.
+            log_warn "_auth_pwquality_pkg_name: unknown DISTRO_FAMILY '${DISTRO_FAMILY}', defaulting to libpam-pwquality" >&2
             printf 'libpam-pwquality'
             ;;
     esac

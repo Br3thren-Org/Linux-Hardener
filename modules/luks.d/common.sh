@@ -455,7 +455,9 @@ _luks_crypttab_add() {
     printf '%s %s %s %s\n' "${name}" "${src}" "${key}" "${opts}" >> "${LUKS_CRYPTTAB}"
 
     if ! _luks_crypttab_check "${LUKS_CRYPTTAB}" || ! _luks_crypttab_dryrun; then
-        printf '%s' "${saved}" > "${LUKS_CRYPTTAB}"
+        # %s\n: $(cat) stripped the trailing newline — writing it back bare
+        # would make the next append glue onto the last line.
+        printf '%s\n' "${saved}" > "${LUKS_CRYPTTAB}"
         log_error "luks: new crypttab entry '${name}' failed validation — reverted"
         return 1
     fi

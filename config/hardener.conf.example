@@ -115,10 +115,14 @@ ENABLE_UNATTENDED_UPGRADES="true"
 #   collector outages without ever blocking local logging.
 # RSYSLOG_REMOTE_PROTOCOL: tcp | tls (tls requires RSYSLOG_REMOTE_CERT, the
 #   CA certificate that signed the collector's certificate).
+# RSYSLOG_REMOTE_PERMITTED_PEER: name to verify in the collector's certificate
+#   (x509/name); defaults to the host part of RSYSLOG_REMOTE_HOST.
+# IPv6 collectors use bracketed form: [2001:db8::15]:6514
 # -----------------------------------------------------------------------------
 RSYSLOG_REMOTE_HOST=""
 RSYSLOG_REMOTE_PROTOCOL="tcp"
 RSYSLOG_REMOTE_CERT=""
+RSYSLOG_REMOTE_PERMITTED_PEER=""
 
 # -----------------------------------------------------------------------------
 # Integrity

@@ -95,15 +95,21 @@ rhel_setup_firewall() {
 
     systemctl enable --now firewalld
 
-    # Set default zone to drop — deny everything not explicitly permitted
-    firewall-cmd --set-default-zone=drop
-
-    # Allow SSH — use service name for port 22, otherwise add port directly
+    # Configure the drop zone FIRST, reload, and only then make it the
+    # default. Flipping the default zone before SSH is permitted (runtime)
+    # drops every new SSH connection until the final reload — and if any
+    # step in between fails, permanently.
     local ssh_port="${SSH_PORT:-22}"
+    local ssh_add_ok=true
     if [[ "${ssh_port}" == "22" ]]; then
-        firewall-cmd --permanent --zone=drop --add-service=ssh
+        firewall-cmd --permanent --zone=drop --add-service=ssh >/dev/null || ssh_add_ok=false
     else
-        firewall-cmd --permanent --zone=drop --add-port="${ssh_port}/tcp"
+        firewall-cmd --permanent --zone=drop --add-port="${ssh_port}/tcp" >/dev/null || ssh_add_ok=false
+    fi
+    if [[ "${ssh_add_ok}" != "true" ]]; then
+        log_error "rhel_setup_firewall: could not add SSH to the drop zone — aborting before changing the default zone"
+        (( CHANGES_FAILED++ )) || true
+        return 1
     fi
 
     # Add extra allowed TCP ports
@@ -151,7 +157,18 @@ rhel_setup_firewall() {
         "firewall-cmd --list-all --zone=drop" \
         "systemctl stop firewalld && systemctl disable firewalld"
 
-    firewall-cmd --reload
+    # Load the permanent drop-zone config into runtime, THEN switch the
+    # default zone — the runtime drop zone already permits SSH at that point.
+    if ! firewall-cmd --reload; then
+        log_error "rhel_setup_firewall: firewall-cmd --reload failed — default zone left unchanged"
+        (( CHANGES_FAILED++ )) || true
+        return 1
+    fi
+    if ! firewall-cmd --set-default-zone=drop; then
+        log_error "rhel_setup_firewall: could not set default zone to drop"
+        (( CHANGES_FAILED++ )) || true
+        return 1
+    fi
     log_success "firewalld configured and active"
 }
 
@@ -172,17 +189,18 @@ rhel_setup_tmp_hook() {
 
     local toggle_script="/usr/local/sbin/hardener-tmp-toggle.sh"
     local plugin_conf="/etc/dnf/plugins/hardener-tmp-remount.conf"
-    local plugin_py="/usr/lib/python3/dist-packages/dnf-plugins/hardener_tmp_remount.py"
 
-    # Resolve the correct dnf plugin directory
+    # Resolve the plugin directory from dnf itself — site.getsitepackages()
+    # returns the lib64 platlib first on EL, which dnf does not scan, and
+    # /usr/lib/python3/dist-packages is a Debian path that never exists here.
     local dnf_plugin_dir
-    dnf_plugin_dir="$(python3 -c \
-        "import site; print(next(p for p in site.getsitepackages() if 'site-packages' in p))" \
-        2>/dev/null)/dnf-plugins"
-    if [[ -z "${dnf_plugin_dir}" || ! -d "$(dirname "${dnf_plugin_dir}")" ]]; then
-        dnf_plugin_dir="/usr/lib/python3/dist-packages/dnf-plugins"
+    dnf_plugin_dir="$(python3 -c 'import dnf.const; print(dnf.const.PLUGINPATH)' 2>/dev/null || true)"
+    if [[ -z "${dnf_plugin_dir}" ]]; then
+        log_error "rhel_setup_tmp_hook: could not resolve the DNF plugin path — /tmp noexec plugin NOT installed"
+        (( CHANGES_FAILED++ )) || true
+        return 1
     fi
-    plugin_py="${dnf_plugin_dir}/hardener_tmp_remount.py"
+    local plugin_py="${dnf_plugin_dir}/hardener_tmp_remount.py"
 
     mkdir -p "${dnf_plugin_dir}"
 

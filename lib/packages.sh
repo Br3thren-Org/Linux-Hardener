@@ -102,11 +102,12 @@ packages_apply() {
                 "pkg_install ${pkg}"
 
             if should_write; then
-                pkg_remove "${pkg}" || {
+                if pkg_remove "${pkg}"; then
+                    (( CHANGES_APPLIED++ )) || true
+                else
                     log_warn "Failed to remove ${pkg} (possible dependency conflict); continuing"
                     (( CHANGES_FAILED++ )) || true
-                }
-                (( CHANGES_APPLIED++ )) || true
+                fi
             else
                 log_info "[DRY-RUN] Would remove package: ${pkg}"
                 (( CHANGES_SKIPPED++ )) || true
@@ -142,7 +143,7 @@ packages_apply() {
             ;;
         rhel)
             # Install EPEL for rkhunter (not available in base repos)
-            if [[ "${DISTRO_ID:-}" != "fedora" ]]; then
+            if should_write && [[ "${DISTRO_ID:-}" != "fedora" ]]; then
                 dnf install -y epel-release 2>/dev/null || true
             fi
             local rhel_security_pkgs=(psacct sysstat curl rkhunter)
@@ -191,19 +192,9 @@ packages_apply() {
         log_info "Enabled debsums weekly cron check"
     fi
 
-    # --- restrict compiler access (HRDN-7222) ---
-    if should_write; then
-        for compiler in /usr/bin/gcc /usr/bin/g++ /usr/bin/cc; do
-            if [[ -f "${compiler}" ]] && [[ ! -L "${compiler}" ]]; then
-                local current_mode
-                current_mode="$(stat -c '%a' "${compiler}" 2>/dev/null)"
-                if [[ "${current_mode}" != "700" ]]; then
-                    chmod 700 "${compiler}" 2>/dev/null || true
-                    log_change "Restricted ${compiler} to root only (was ${current_mode})" "HRDN-7222: limit compiler access" "low"
-                fi
-            fi
-        done
-    fi
+    # Compiler restriction (HRDN-7222) is owned by lib/filesystem.sh
+    # (_fs_restrict_compilers): it resolves symlinks, honours
+    # ENABLE_COMPILER_RESTRICT, and has a rollback path.
 
     # --- configure unattended upgrades ---
     case "${DISTRO_FAMILY}" in
@@ -221,6 +212,18 @@ packages_apply() {
 
 # ─── Rollback ─────────────────────────────────────────────────────────────────
 
+# _packages_restore_or_remove <path> — restore from backup if one exists,
+# otherwise remove the file (it was created from scratch by apply).
+_packages_restore_or_remove() {
+    local path="${1}"
+    if [[ -e "${BACKUP_DIR}${path}" ]]; then
+        restore_file "${path}" || true
+    elif [[ -e "${path}" ]]; then
+        rm -f "${path}"
+        log_info "packages_rollback: removed ${path} (created by hardener, no prior version)"
+    fi
+}
+
 packages_rollback() {
     log_info "packages_rollback: starting package module rollback"
 
@@ -229,14 +232,18 @@ packages_rollback() {
     log_warn "To reinstall a removed package, run: pkg_install <package-name>"
     log_warn "To revert updates, restore from a full system snapshot or backup."
 
-    # Restore unattended-upgrades / dnf-automatic configuration files from backup.
+    # Restore config files from backup; a file with NO backup did not exist
+    # before apply (backup_file skips missing sources), so it was created by
+    # the hardener and must be removed, not left active.
+    local cfg
     case "${DISTRO_FAMILY}" in
         debian)
-            restore_file "/etc/apt/apt.conf.d/50unattended-upgrades"
-            restore_file "/etc/apt/apt.conf.d/20auto-upgrades"
+            for cfg in /etc/apt/apt.conf.d/50unattended-upgrades /etc/apt/apt.conf.d/20auto-upgrades; do
+                _packages_restore_or_remove "${cfg}"
+            done
             ;;
         rhel)
-            restore_file "/etc/dnf/automatic.conf"
+            _packages_restore_or_remove "/etc/dnf/automatic.conf"
             ;;
         *)
             log_warn "packages_rollback: unknown DISTRO_FAMILY '${DISTRO_FAMILY}', skipping config restore"

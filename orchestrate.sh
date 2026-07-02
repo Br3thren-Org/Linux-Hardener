@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HETZNER_API_TOKEN="${HETZNER_API_TOKEN:-}"
 HETZNER_SSH_KEY_NAME="${HETZNER_SSH_KEY_NAME:-}"
 HETZNER_SSH_KEY_PATH="${HETZNER_SSH_KEY_PATH:-~/.ssh/id_ed25519}"
-HETZNER_SERVER_TYPE="${HETZNER_SERVER_TYPE:-cx22}"
+HETZNER_SERVER_TYPE="${HETZNER_SERVER_TYPE:-cx23}"
 HETZNER_LOCATION="${HETZNER_LOCATION:-fsn1}"
 HETZNER_IMAGES="${HETZNER_IMAGES:-debian-12,ubuntu-24.04,rocky-9,alma-9}"
 
@@ -184,10 +184,12 @@ check_local_prerequisites() {
 # ─── SSH / SCP helpers ────────────────────────────────────────────────────────
 
 # remote_exec <ip> <command...>
+# -n: never read stdin — in the sequential test loop ssh would otherwise
+# drain the manifest lines being fed to `while read`.
 remote_exec() {
     local ip="${1}"
     shift
-    ssh \
+    ssh -n \
         -i "${SSH_KEY_PATH}" \
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 \
@@ -276,6 +278,22 @@ except Exception:
             break
         fi
 
+        # Convergence short-circuit: if the re-apply changed nothing, the
+        # remaining safe-to-remediate items are ones the hardener cannot fix
+        # (e.g. FILE-6310 separate partitions on a single-root VPS). Re-running
+        # an idempotent hardener will never reduce them, so stop here BEFORE
+        # spending another full Lynis scan.
+        local applied_count
+        applied_count="$(grep -oE '^ Applied : [0-9]+' "${artifacts_dir}/harden-apply-iter${iteration}.log" \
+            | tail -1 | grep -oE '[0-9]+' || printf '0')"
+        if [[ "${applied_count}" == "0" ]]; then
+            printf '[INFO] [%s] Iteration %d: re-apply made no changes — hardening converged, stopping.\n' \
+                "${image}" "${iteration}"
+            break
+        fi
+        printf '[INFO] [%s] Iteration %d: re-apply made %s change(s) — re-scanning.\n' \
+            "${image}" "${iteration}" "${applied_count}"
+
         # Re-run Lynis post-hardening
         local post_label="post-hardening-iter${iteration}"
         if ! remote_exec "${ip}" "cd /opt/linux-hardener && bash scripts/lynis_runner.sh run ${post_label}" \
@@ -291,8 +309,10 @@ except Exception:
         remote_copy_from "${ip}" "/tmp/lynis-collect-iter${iteration}" \
             "${artifacts_dir}/lynis-iter${iteration}" || true
 
-        # Parse with lynis_parser.py
-        local pre_dat="${artifacts_dir}/lynis-collected/pre-hardening/lynis-report.dat"
+        # Parse with lynis_parser.py. scp -r into the pre-existing
+        # lynis-collected/ dir nests the remote dir name — the pre-hardening
+        # report lives under lynis-collected/lynis-collect/ (see step 8/9).
+        local pre_dat="${artifacts_dir}/lynis-collected/lynis-collect/pre-hardening/lynis-report.dat"
         local post_dat="${artifacts_dir}/lynis-iter${iteration}/${post_label}/lynis-report.dat"
         local iter_summary="${artifacts_dir}/summary-iter${iteration}.json"
 
@@ -306,24 +326,33 @@ except Exception:
                 >> "${artifacts_dir}/parse-iter${iteration}.log" 2>&1 || true
         fi
 
-        # Check score delta
+        # Check score improvement BETWEEN consecutive iterations (not against
+        # the fixed pre-hardening baseline — that delta never shrinks, so the
+        # loop would always run to MAX_ITERATIONS).
         if [[ -f "${iter_summary}" ]]; then
-            local delta
-            delta="$(python3 -c "
+            local prev_index this_index
+            prev_index="$(python3 -c "
 import json, sys
 try:
-    with open(sys.argv[1]) as f:
-        data = json.load(f)
-    print(data.get('delta', {}).get('hardening_index_numeric', 0))
+    print(json.load(open(sys.argv[1]))['post']['hardening_index'])
+except Exception:
+    print(0)
+" "${summary_json}" 2>/dev/null || printf '0')"
+            this_index="$(python3 -c "
+import json, sys
+try:
+    print(json.load(open(sys.argv[1]))['post']['hardening_index'])
 except Exception:
     print(0)
 " "${iter_summary}" 2>/dev/null || printf '0')"
+            local improvement=$(( this_index - prev_index ))
 
-            printf '[INFO] [%s] Iteration %d: score delta = %s\n' "${image}" "${iteration}" "${delta}"
+            printf '[INFO] [%s] Iteration %d: hardening index %s -> %s (improvement %s)\n' \
+                "${image}" "${iteration}" "${prev_index}" "${this_index}" "${improvement}"
 
-            if (( delta < MIN_SCORE_DELTA )); then
-                printf '[INFO] [%s] Score delta %d < MIN_SCORE_DELTA %d — stopping iteration.\n' \
-                    "${image}" "${delta}" "${MIN_SCORE_DELTA}"
+            if (( improvement < MIN_SCORE_DELTA )); then
+                printf '[INFO] [%s] Improvement %d < MIN_SCORE_DELTA %d — stopping iteration.\n' \
+                    "${image}" "${improvement}" "${MIN_SCORE_DELTA}"
                 break
             fi
 
@@ -357,13 +386,35 @@ test_server() {
 
     printf '[INFO] [%s] Step 1: Bootstrap\n' "${server_image}"
 
-    remote_exec "${server_ip}" "mkdir -p /opt/linux-hardener"
+    # Stage a sanitized copy of config/: HETZNER_* values (API token, key
+    # name) are control-machine credentials and must never land on a target.
+    local staged_config_dir
+    staged_config_dir="$(mktemp -d)"
+    cp -R "${SCRIPT_DIR}/config/." "${staged_config_dir}/"
+    local staged_conf
+    for staged_conf in "${staged_config_dir}"/*.conf "${staged_config_dir}"/*.conf.example; do
+        [[ -f "${staged_conf}" ]] || continue
+        grep -v '^HETZNER_' "${staged_conf}" > "${staged_conf}.sanitized" || true
+        mv "${staged_conf}.sanitized" "${staged_conf}"
+    done
 
-    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/lib/"      "/opt/linux-hardener/lib"
-    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/modules/"  "/opt/linux-hardener/modules"
-    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/scripts/"  "/opt/linux-hardener/scripts"
-    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/config/"   "/opt/linux-hardener/config"
-    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/harden.sh" "/opt/linux-hardener/harden.sh"
+    # test_server is invoked inside `if !`, which disables errexit for its
+    # whole body — the bootstrap copies need explicit failure handling or a
+    # transient scp error would silently harden a half-deployed tree.
+    local bootstrap_ok=true
+    remote_exec "${server_ip}" "mkdir -p /opt/linux-hardener"                             || bootstrap_ok=false
+    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/lib/"      "/opt/linux-hardener/lib"     || bootstrap_ok=false
+    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/modules/"  "/opt/linux-hardener/modules" || bootstrap_ok=false
+    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/scripts/"  "/opt/linux-hardener/scripts" || bootstrap_ok=false
+    remote_copy_to "${server_ip}" "${staged_config_dir}/"   "/opt/linux-hardener/config"  || bootstrap_ok=false
+    remote_copy_to "${server_ip}" "${SCRIPT_DIR}/harden.sh" "/opt/linux-hardener/harden.sh" || bootstrap_ok=false
+    rm -rf "${staged_config_dir}"
+
+    if [[ "${bootstrap_ok}" != "true" ]]; then
+        printf '[ERROR] [%s] Bootstrap failed — framework not fully deployed.\n' "${server_image}" >&2
+        OVERALL_PASS="false"
+        return 1
+    fi
 
     remote_exec "${server_ip}" \
         "chmod +x /opt/linux-hardener/harden.sh /opt/linux-hardener/scripts/*.sh"

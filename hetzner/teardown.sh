@@ -180,18 +180,25 @@ teardown_all_test_servers() {
         fi
     fi
 
-    # API fallback if hcloud not available or returned nothing
+    # API fallback if hcloud not available or returned nothing.
+    # Paginate: the API defaults to 25 servers per page — a single GET would
+    # silently miss test servers beyond page 1.
     if (( ${#entries[@]} == 0 )); then
-        local api_list
-        if ! api_list="$(hetzner_api GET "/servers" 2>/dev/null)"; then
-            printf 'ERROR: Failed to list servers via REST API\n' >&2
-            return 1
-        fi
-        while IFS= read -r line; do
-            entries+=("${line}")
-        done < <(printf '%s' "${api_list}" \
-            | jq -r --arg pat "${TEST_SERVER_PATTERN}" \
-                '.servers[] | select(.name | startswith($pat)) | "\(.id)|\(.name)"')
+        local page=1 api_list next_page
+        while :; do
+            if ! api_list="$(hetzner_api GET "/servers?page=${page}&per_page=50" 2>/dev/null)"; then
+                printf 'ERROR: Failed to list servers via REST API (page %d)\n' "${page}" >&2
+                return 1
+            fi
+            while IFS= read -r line; do
+                entries+=("${line}")
+            done < <(printf '%s' "${api_list}" \
+                | jq -r --arg pat "${TEST_SERVER_PATTERN}" \
+                    '.servers[] | select(.name | startswith($pat)) | "\(.id)|\(.name)"')
+            next_page="$(printf '%s' "${api_list}" | jq -r '.meta.pagination.next_page // empty')"
+            [[ -z "${next_page}" || "${next_page}" == "null" ]] && break
+            page="${next_page}"
+        done
     fi
 
     if (( ${#entries[@]} == 0 )); then
@@ -248,7 +255,9 @@ main() {
             fi
             local build_id="${2}"
             local manifest_path
-            manifest_path="$(pwd)/artifacts/${build_id}/servers.json"
+            # Manifests live under the PROJECT root (provision.sh writes them
+            # there) — not under whatever directory teardown is run from.
+            manifest_path="$(cd "${SCRIPT_DIR}/.." && pwd)/artifacts/${build_id}/servers.json"
             printf 'Using manifest: %s\n' "${manifest_path}"
             teardown_from_manifest "${manifest_path}"
             ;;

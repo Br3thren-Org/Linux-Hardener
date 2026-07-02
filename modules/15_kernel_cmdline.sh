@@ -170,11 +170,45 @@ kernel_cmdline_apply() {
 
     backup_file "${_KCMD_GRUB_DEFAULT}"
 
-    # Append missing params inside the existing quoted value
+    # Append missing params by rebuilding the line in bash — interpolating
+    # user-supplied values (KERNEL_CMDLINE_EXTRA) into a sed replacement
+    # breaks on '/', '&' and backreferences.
     local additions="${missing[*]}"
-    sed -i -E "s/^(GRUB_CMDLINE_LINUX=\")([^\"]*)\"/\1\2 ${additions}\"/" "${_KCMD_GRUB_DEFAULT}"
-    # Normalize accidental double spaces
-    sed -i -E 's/^(GRUB_CMDLINE_LINUX=")\s+/\1/; s/\s+"/"/' "${_KCMD_GRUB_DEFAULT}"
+    local tmp_grub line merged replaced=false
+    tmp_grub="$(mktemp)"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ ^GRUB_CMDLINE_LINUX=\"(.*)\"[[:space:]]*$ ]]; then
+            merged="${BASH_REMATCH[1]}"
+            merged="${merged:+${merged} }${additions}"
+            line="GRUB_CMDLINE_LINUX=\"${merged}\""
+            replaced=true
+        elif [[ "${line}" =~ ^GRUB_CMDLINE_LINUX=([^\"\'[:space:]]*)[[:space:]]*$ ]]; then
+            # Unquoted single-token form
+            merged="${BASH_REMATCH[1]}"
+            merged="${merged:+${merged} }${additions}"
+            line="GRUB_CMDLINE_LINUX=\"${merged}\""
+            replaced=true
+        fi
+        printf '%s\n' "${line}"
+    done < "${_KCMD_GRUB_DEFAULT}" > "${tmp_grub}"
+    if [[ "${replaced}" == "false" ]]; then
+        # No recognizable assignment — append one (last definition wins)
+        printf 'GRUB_CMDLINE_LINUX="%s"\n' "${additions}" >> "${tmp_grub}"
+    fi
+    chmod --reference="${_KCMD_GRUB_DEFAULT}" "${tmp_grub}" 2>/dev/null || chmod 644 "${tmp_grub}"
+    mv "${tmp_grub}" "${_KCMD_GRUB_DEFAULT}"
+
+    # Verify every parameter actually landed before regenerating GRUB
+    local verify_line param_check
+    verify_line="$(grep -E '^GRUB_CMDLINE_LINUX=' "${_KCMD_GRUB_DEFAULT}" | tail -1)"
+    for param_check in "${missing[@]}"; do
+        if ! grep -qw -- "${param_check}" <<< "${verify_line}"; then
+            log_error "kernel_cmdline: parameter '${param_check}' missing after edit — reverting"
+            restore_file "${_KCMD_GRUB_DEFAULT}" || true
+            (( CHANGES_FAILED++ )) || true
+            return 1
+        fi
+    done
 
     # ── Regenerate, verify, revert on failure ────────────────────────────────
     local regen_ok=true grub_cfg="" script_check=""

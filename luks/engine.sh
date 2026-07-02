@@ -19,6 +19,7 @@ set -euo pipefail
 : "${ENGINE_SSH_PUBKEY:=}"
 : "${ENGINE_DROPBEAR_PORT:=2222}"
 : "${ENGINE_PROVISION_USER:=}"
+: "${ENGINE_PASSPHRASE:=}"
 : "${ENGINE_DRY_RUN:=false}"
 
 # Internal state
@@ -201,6 +202,10 @@ engine_preflight() {
         required_tools+=(mkfs.xfs)
     fi
 
+    if [[ "${ENGINE_EFI_SIZE}" -gt 0 ]]; then
+        required_tools+=(mkfs.vfat)
+    fi
+
     if [[ "${ENGINE_RAID_LEVEL}" != "none" ]]; then
         required_tools+=(mdadm)
     fi
@@ -224,9 +229,34 @@ engine_preflight() {
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
         _engine_error "Missing required tools: ${missing_tools[*]}"
         _engine_info "Attempting to install missing tools..."
-        apt-get update -y &>/dev/null && \
-            apt-get install -y cryptsetup gdisk debootstrap mdadm dosfstools xfsprogs &>/dev/null || \
-            _engine_fail "Could not install missing tools: ${missing_tools[*]}"
+        apt-get update -y &>/dev/null || true
+        apt-get install -y cryptsetup gdisk debootstrap mdadm dosfstools xfsprogs dnf &>/dev/null || true
+
+        # Re-check: proceeding with a tool still missing would fail AFTER the
+        # disks have been wiped (e.g. dnf missing for a RHEL target).
+        local still_missing=()
+        for tool in "${required_tools[@]}"; do
+            command -v "${tool}" &>/dev/null || still_missing+=("${tool}")
+        done
+        if [[ ${#still_missing[@]} -gt 0 ]]; then
+            _engine_fail "Required tools still missing after install attempt: ${still_missing[*]}"
+        fi
+    fi
+
+    # Refuse to touch a disk backing the currently running system — engine.sh
+    # must only run in a rescue environment; on a normally-booted host the
+    # cleanup below would lazy-unmount and wipe the live root.
+    local root_src root_parents disk_base
+    root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+    if [[ "${root_src}" == /dev/* ]]; then
+        root_parents="$(lsblk -rsno NAME "${root_src}" 2>/dev/null || true)"
+        local disk
+        for disk in "${_ENGINE_DETECTED_DISKS[@]}"; do
+            disk_base="$(basename "${disk}")"
+            if grep -qx "${disk_base}" <<< "${root_parents}"; then
+                _engine_fail "Refusing to wipe ${disk}: it backs the running root filesystem (${root_src}). Boot into rescue mode first."
+            fi
+        done
     fi
 
     # Stop any existing RAID arrays and close LUKS volumes
@@ -270,6 +300,13 @@ engine_preflight() {
     # Validate SSH public key
     if [[ -z "${ENGINE_SSH_PUBKEY}" ]]; then
         _engine_fail "ENGINE_SSH_PUBKEY is empty — cannot configure Dropbear"
+    fi
+
+    # Validate the passphrase BEFORE any destructive step — discovering it
+    # empty at luksFormat time means the disks were already wiped for nothing
+    # (or worse, formatted with an empty passphrase).
+    if [[ "${ENGINE_DRY_RUN}" != "true" && -z "${ENGINE_PASSPHRASE}" ]]; then
+        _engine_fail "ENGINE_PASSPHRASE is empty"
     fi
 
     _engine_ok "Pre-flight checks passed"
@@ -405,9 +442,11 @@ engine_assemble_raid() {
         "${boot_parts[@]}" || _engine_fail "Failed to create md0 (boot)"
     _ENGINE_BOOT_DEVICE="/dev/md0"
 
-    # md1: EFI (raid1 for bootability)
+    # md1: EFI (raid1 for bootability). metadata 1.0 puts the superblock at
+    # the END of the members — firmware reads each one as a plain vfat ESP;
+    # with 1.2 the superblock sits at the start and no firmware can boot it.
     if [[ ${#efi_parts[@]} -gt 0 ]]; then
-        mdadm --create /dev/md1 "${mdadm_opts[@]}" \
+        mdadm --create /dev/md1 --run --force --metadata=1.0 \
             --level=raid1 \
             --raid-devices="${disk_count}" \
             "${efi_parts[@]}" || _engine_fail "Failed to create md1 (efi)"
@@ -625,6 +664,21 @@ _engine_mount_vfs() {
     mount -t sysfs sys "${_ENGINE_MOUNT}/sys"
 }
 
+# _engine_chroot_dracut [extra dracut args...]
+# dracut inside the chroot MUST target the chroot's installed kernel:
+# without --kver it builds for the RESCUE kernel (uname -r), whose modules
+# do not exist in the chroot. --no-hostonly: hostonly probing would inspect
+# the rescue system, not the target.
+_engine_chroot_dracut() {
+    local kver
+    kver="$(chroot "${_ENGINE_MOUNT}" sh -c 'ls -1 /lib/modules 2>/dev/null | head -1')"
+    if [[ -z "${kver}" ]]; then
+        _engine_error "No kernel found in chroot /lib/modules — cannot build initramfs"
+        return 1
+    fi
+    chroot "${_ENGINE_MOUNT}" dracut --force --no-hostonly --kver "${kver}" "$@"
+}
+
 # ─── Step 8: Configure Chroot ────────────────────────────────────────────────
 
 engine_configure() {
@@ -715,7 +769,11 @@ _engine_configure_dropbear_rhel() {
     local dracut_conf="${_ENGINE_MOUNT}/etc/dracut.conf.d/crypt-ssh.conf"
     mkdir -p "$(dirname "${dracut_conf}")"
 
+    # add_dracutmodules in the conf (not only --add on one invocation): every
+    # later dracut rebuild (network, mdraid) regenerates the initramfs and
+    # would otherwise silently drop the crypt-ssh module again.
     cat > "${dracut_conf}" <<EOF
+add_dracutmodules+=" crypt-ssh "
 dropbear_port="${ENGINE_DROPBEAR_PORT}"
 dropbear_acl="/root/.ssh/authorized_keys_dropbear"
 EOF
@@ -728,8 +786,7 @@ EOF
     chmod 600 "${authkeys}"
 
     # Rebuild initramfs with dracut-crypt-ssh
-    chroot "${_ENGINE_MOUNT}" dracut --force --add "crypt-ssh" \
-        || _engine_fail "dracut rebuild failed"
+    _engine_chroot_dracut || _engine_fail "dracut rebuild failed"
 
     _engine_info "dracut-crypt-ssh configured (port ${ENGINE_DROPBEAR_PORT})"
 }
@@ -793,7 +850,9 @@ NETEOF
                 > "${dracut_net}"
             # NetworkManager should handle real OS networking via DHCP
             chroot "${_ENGINE_MOUNT}" systemctl enable NetworkManager 2>/dev/null || true
-            chroot "${_ENGINE_MOUNT}" dracut --force || true
+            # Hard failure: an initramfs without networking cannot be
+            # remote-unlocked — the server would be unreachable after reboot.
+            _engine_chroot_dracut || _engine_fail "dracut network rebuild failed"
             ;;
     esac
 }
@@ -804,13 +863,20 @@ _engine_configure_grub() {
     local luks_uuid
     luks_uuid="$(blkid -s UUID -o value "${_ENGINE_LUKS_DEVICE}")"
 
+    # Debian's initramfs-tools unlocks via /etc/crypttab; dracut (RHEL) needs
+    # rd.luks.uuid on the kernel command line or the volume is never opened.
+    local crypt_args="ip=dhcp"
+    if [[ "${_ENGINE_DISTRO_FAMILY}" == "rhel" ]]; then
+        crypt_args="rd.luks.uuid=${luks_uuid} rd.luks.name=${luks_uuid}=crypt-root ip=dhcp rd.neednet=1"
+    fi
+
     local grub_default="${_ENGINE_MOUNT}/etc/default/grub"
     cat > "${grub_default}" <<EOF
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=5
 GRUB_DISTRIBUTOR="${_ENGINE_DISTRO_ID}"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet"
-GRUB_CMDLINE_LINUX="cryptdevice=UUID=${luks_uuid}:crypt-root ip=dhcp"
+GRUB_CMDLINE_LINUX="${crypt_args}"
 GRUB_ENABLE_CRYPTODISK=y
 EOF
 
@@ -841,6 +907,12 @@ EOF
                 || _engine_fail "update-grub failed"
             ;;
         rhel)
+            # Only the BIOS path is implemented (grub2-pc + grub2-install).
+            # Completing a UEFI provision here would leave a machine with no
+            # EFI bootloader — an unbootable encrypted disk. Fail early.
+            if [[ -d /sys/firmware/efi ]]; then
+                _engine_fail "UEFI boot detected: the RHEL path only supports BIOS/legacy boot (grub2-efi/shim installation is not implemented)"
+            fi
             local disk
             for disk in "${_ENGINE_DETECTED_DISKS[@]}"; do
                 chroot "${_ENGINE_MOUNT}" grub2-install "${disk}" \
@@ -909,13 +981,16 @@ _engine_configure_mdadm() {
     mdadm --detail --scan >> "${_ENGINE_MOUNT}/etc/mdadm/mdadm.conf" 2>/dev/null || \
         mdadm --detail --scan >> "${_ENGINE_MOUNT}/etc/mdadm.conf" 2>/dev/null || true
 
-    # Ensure initramfs includes mdadm
+    # Ensure initramfs includes mdadm — hard failure on RHEL: without the
+    # mdraid module the arrays never assemble and the server cannot boot.
     case "${_ENGINE_DISTRO_FAMILY}" in
         debian)
             chroot "${_ENGINE_MOUNT}" update-initramfs -u || true
             ;;
         rhel)
-            chroot "${_ENGINE_MOUNT}" dracut --force --add "mdraid" || true
+            printf 'add_dracutmodules+=" mdraid "\n' \
+                > "${_ENGINE_MOUNT}/etc/dracut.conf.d/mdraid.conf"
+            _engine_chroot_dracut || _engine_fail "dracut mdraid rebuild failed"
             ;;
     esac
 }

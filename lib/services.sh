@@ -127,7 +127,7 @@ services_rollback() {
 
     local entry name
 
-    # Unmask DISABLE_SERVICES (do not re-enable or start — just unmask)
+    # Unmask DISABLE_SERVICES
     for entry in "${DISABLE_SERVICES[@]}"; do
         name="${entry%%|*}"
 
@@ -147,5 +147,27 @@ services_rollback() {
     if svc_exists "${cond_name}"; then
         log_info "services_rollback: unmasking '${cond_name}'"
         systemctl unmask "${cond_name}" 2>/dev/null || true
+    fi
+
+    # Restore the pre-disable enabled/active state recorded by svc_disable —
+    # unmasking alone would leave previously-running services stopped forever.
+    local state_file="${BACKUP_DIR}/services-state"
+    if [[ -f "${state_file}" ]]; then
+        local svc was_active was_enabled
+        while read -r svc was_active was_enabled; do
+            [[ -z "${svc}" ]] && continue
+            if [[ "${was_enabled}" == "yes" ]]; then
+                systemctl enable "${svc}" 2>/dev/null \
+                    && log_info "services_rollback: re-enabled '${svc}'" \
+                    || log_warn "services_rollback: could not re-enable '${svc}'"
+            fi
+            if [[ "${was_active}" == "yes" ]]; then
+                systemctl start "${svc}" 2>/dev/null \
+                    && log_info "services_rollback: restarted '${svc}'" \
+                    || log_warn "services_rollback: could not restart '${svc}'"
+            fi
+        done < "${state_file}"
+    else
+        log_debug "services_rollback: no services-state record in ${BACKUP_DIR} — unmask only"
     fi
 }

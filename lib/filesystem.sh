@@ -120,7 +120,10 @@ _fs_fstab_has_opt() {
 
 # _fs_fstab_add_opts <mountpoint> <opts_to_add>
 # Adds comma-separated opts to the existing fstab options for <mountpoint>.
-# If the mount is not in fstab, adds a tmpfs entry.
+# If the mount is not in fstab, a tmpfs entry is appended ONLY when the
+# mountpoint currently IS a tmpfs — appending one for a real filesystem
+# (e.g. /boot mounted via a systemd unit) would shadow it with an empty
+# tmpfs on the next boot.
 _fs_fstab_add_opts() {
     local mountpoint="${1}"
     local new_opts="${2}"
@@ -152,11 +155,22 @@ _fs_fstab_add_opts() {
 
     # If the mountpoint was not in fstab at all, append a new entry
     if ! printf '%s\n' "${fstab_content}" | awk -v mp="${mountpoint}" '$2==mp{found=1}END{exit !found}'; then
+        local cur_fstype
+        cur_fstype="$(awk -v mp="${mountpoint}" '$2 == mp { print $3 }' /proc/mounts 2>/dev/null | head -1)"
+        if [[ "${cur_fstype}" != "tmpfs" ]]; then
+            log_warn "_fs_fstab_add_opts: ${mountpoint} (${cur_fstype:-unknown fs}) has no fstab entry — skipping (options will not persist across reboots)"
+            return 0
+        fi
         updated_content="${updated_content}
 tmpfs  ${mountpoint}  tmpfs  defaults,${new_opts}  0  0"
     fi
 
-    printf '%s\n' "${updated_content}" > /etc/fstab
+    # Write via temp file + mv: a truncated /etc/fstab is an unbootable system
+    local tmp_fstab
+    tmp_fstab="$(mktemp /etc/fstab.hardener.XXXXXX)"
+    printf '%s\n' "${updated_content}" > "${tmp_fstab}" || { rm -f "${tmp_fstab}"; return 1; }
+    chmod 644 "${tmp_fstab}"
+    mv "${tmp_fstab}" /etc/fstab
 }
 
 # ─── filesystem_audit ─────────────────────────────────────────────────────────
@@ -292,14 +306,31 @@ filesystem_apply() {
 
     # ── 1. /tmp mount options ─────────────────────────────────────────────────
     if _fs_is_separate_mount /tmp; then
+        # Keyed off NOEXEC_TMP like the audit, the tmpfs branch, and the
+        # package-manager exec hooks — not off the profile name.
         local tmp_opts
-        if [[ "${HARDENING_PROFILE:-aggressive}" == "aggressive" ]]; then
+        if [[ "${NOEXEC_TMP:-true}" == "true" ]]; then
             tmp_opts="nodev,nosuid,noexec"
         else
             tmp_opts="nodev,nosuid"
         fi
 
-        if ! should_write; then
+        # Idempotency guard (like /boot and /dev/shm below): once
+        # ENABLE_TMPFS_TMP has mounted a tmpfs on /tmp, later runs re-enter
+        # this branch — re-applying and re-counting a change every time
+        # unless we check the live options first.
+        local tmp_missing=false opt
+        for opt in ${tmp_opts//,/ }; do
+            if ! _fs_check_mount_opt /tmp "${opt}"; then
+                tmp_missing=true
+                break
+            fi
+        done
+
+        if [[ "${tmp_missing}" != "true" ]]; then
+            log_debug "filesystem_apply: /tmp already has required options — skipping"
+            (( CHANGES_SKIPPED++ )) || true
+        elif ! should_write; then
             log_info "[DRY-RUN] Would add '${tmp_opts}' to /tmp fstab entry and remount"
         else
             log_change \

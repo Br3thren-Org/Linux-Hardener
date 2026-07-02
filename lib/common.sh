@@ -29,10 +29,13 @@ declare -g AUDIT_FINDINGS=0
 
 log_init() {
     mkdir -p "${HARDENER_LOG_DIR}"
+    # Root-only: log lines can contain generated secrets (GRUB password,
+    # header-backup passphrases) — never leave them world-readable.
+    chmod 0700 "${HARDENER_LOG_DIR}"
     local timestamp
     timestamp="$(date +%Y%m%d_%H%M%S)"
     LOG_FILE="${HARDENER_LOG_DIR}/hardener_${timestamp}.log"
-    touch "${LOG_FILE}"
+    (umask 077; touch "${LOG_FILE}")
     log_info "Linux Hardener v${HARDENER_VERSION} starting"
     log_info "Mode: ${RUN_MODE:-unset}  Distro: ${DISTRO_ID:-unknown}  Config: ${CONFIG_FILE:-none}"
 }
@@ -176,7 +179,7 @@ load_config() {
 
 apply_profile_defaults() {
     case "${HARDENING_PROFILE:-aggressive}" in
-        standard)
+        minimal|standard)
             : "${NOEXEC_TMP:=false}"
             : "${ENABLE_PASSWORD_POLICY:=false}"
             : "${ENABLE_FAIL2BAN:=false}"
@@ -187,7 +190,7 @@ apply_profile_defaults() {
             : "${ENABLE_TMPFS_TMP:=false}"
             : "${ENABLE_COMPILER_RESTRICT:=false}"
             ;;
-        aggressive|*)
+        aggressive)
             : "${NOEXEC_TMP:=true}"
             : "${ENABLE_PASSWORD_POLICY:=true}"
             : "${ENABLE_FAIL2BAN:=true}"
@@ -197,6 +200,12 @@ apply_profile_defaults() {
             : "${ENABLE_GRUB_PASSWORD:=true}"
             : "${ENABLE_TMPFS_TMP:=true}"
             : "${ENABLE_COMPILER_RESTRICT:=true}"
+            ;;
+        *)
+            # A typo'd profile must not silently apply the most aggressive
+            # defaults — fail loudly instead.
+            log_error "Unknown HARDENING_PROFILE '${HARDENING_PROFILE}' (use minimal|standard|aggressive)"
+            exit 1
             ;;
     esac
 }
@@ -228,6 +237,14 @@ backup_file() {
     if [[ -z "${BACKUP_DIR}" ]]; then
         log_warn "backup_file: BACKUP_DIR not set, skipping backup of ${src}"
         return 1
+    fi
+
+    # First write wins: several call sites back up the same file (fstab,
+    # /etc/profile) before successive edits — re-copying would clobber the
+    # pristine copy with an already-modified one.
+    if [[ -e "${BACKUP_DIR}${src}" ]]; then
+        log_debug "backup_file: ${src} already backed up this run, keeping first copy"
+        return 0
     fi
 
     local dest_dir="${BACKUP_DIR}$(dirname "${src}")"
@@ -290,8 +307,22 @@ write_file_atomic() {
 
     backup_file "${dest}"
 
-    printf '%s' "${content}" > "${tmp_file}"
-    mv "${tmp_file}" "${dest}"
+    if ! printf '%s' "${content}" > "${tmp_file}"; then
+        log_error "write_file_atomic: failed to write ${tmp_file} (disk full?)"
+        rm -f "${tmp_file}"
+        return 1
+    fi
+    # Preserve the original mode/ownership — mv would otherwise install the
+    # temp file's umask defaults over e.g. a 0600 config.
+    if [[ -e "${dest}" ]]; then
+        chmod --reference="${dest}" "${tmp_file}" 2>/dev/null || true
+        chown --reference="${dest}" "${tmp_file}" 2>/dev/null || true
+    fi
+    if ! mv "${tmp_file}" "${dest}"; then
+        log_error "write_file_atomic: failed to move ${tmp_file} into place"
+        rm -f "${tmp_file}"
+        return 1
+    fi
     log_debug "Atomically wrote: ${dest}"
 }
 
@@ -302,7 +333,13 @@ write_file_if_changed() {
 
     if [[ -f "${dest}" ]]; then
         local current_content
-        current_content="$(cat "${dest}")"
+        # Append+strip a sentinel so trailing newlines survive the read;
+        # bare $(cat) strips them, and content that ends in '\n' (every
+        # drop-in built with a heredoc + trailing newline) would then never
+        # compare equal — rewriting the file and re-counting a change on
+        # every run (broken idempotency).
+        current_content="$(cat "${dest}"; printf x)"
+        current_content="${current_content%x}"
         if [[ "${current_content}" == "${content}" ]]; then
             log_debug "No change needed: ${dest}"
             (( CHANGES_SKIPPED++ )) || true
@@ -433,6 +470,15 @@ svc_disable() {
     if ! should_write; then
         log_info "[DRY-RUN] Would disable service: ${service}"
         return 0
+    fi
+
+    # Record the pre-disable state so rollback can re-enable/start it
+    if [[ -n "${BACKUP_DIR}" ]]; then
+        local was_active=no was_enabled=no
+        svc_is_active  "${service}" && was_active=yes
+        svc_is_enabled "${service}" && was_enabled=yes
+        printf '%s %s %s\n' "${service}" "${was_active}" "${was_enabled}" \
+            >> "${BACKUP_DIR}/services-state" 2>/dev/null || true
     fi
 
     systemctl stop    "${service}" 2>/dev/null || true

@@ -150,8 +150,9 @@ cmd_run() {
     # Lynis returns non-zero when warnings/suggestions exist — this is expected.
     local lynis_dir
     lynis_dir="$(dirname "${bin}")"
+    # No --no-log: /var/log/lynis.log is collected as an artifact below
     # shellcheck disable=SC2086
-    (cd "${lynis_dir}" && "${bin}" audit system --no-colors --no-log ${quick_flag}) \
+    (cd "${lynis_dir}" && "${bin}" audit system --no-colors ${quick_flag}) \
         | tee "${stdout_log}" || true
 
     # Copy lynis log and report to artifact dir
@@ -190,11 +191,12 @@ cmd_run() {
         # Count suggestion[] entries
         suggestion_count="$(grep -c '^suggestion\[\]=' "${report}" 2>/dev/null || true)"
 
-        # tests_performed value
+        # Test count: Lynis writes lynis_tests_done= (older versions used
+        # other names — accept the known variants)
         local tp_line
-        tp_line="$(grep -m1 '^tests_performed=' "${report}" 2>/dev/null || true)"
+        tp_line="$(grep -m1 -E '^(lynis_tests_done|tests_executed|tests_performed)=' "${report}" 2>/dev/null || true)"
         if [[ -n "${tp_line}" ]]; then
-            tests_performed="${tp_line#tests_performed=}"
+            tests_performed="${tp_line#*=}"
         fi
     fi
 

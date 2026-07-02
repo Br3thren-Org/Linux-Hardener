@@ -7,6 +7,8 @@ Usage:
     lynis_parser.py --single <dat_file> <output_json>
 """
 
+from __future__ import annotations
+
 import json
 import re
 import sys
@@ -35,7 +37,9 @@ _DAT_KEY_SUGGESTION      = "suggestion"
 def parse_finding(value: str) -> dict:
     """Parse a pipe-delimited Lynis finding string.
 
-    Expected format: ``TEST_ID|Description|Details|Severity``
+    Expected format: ``TEST_ID|Description|Details|Solution`` (Lynis findings
+    carry no severity field; the fourth field is the suggested solution and
+    is usually ``-``).
 
     Extra or missing fields are handled gracefully: surplus fields are ignored
     and missing fields default to an empty string.
@@ -44,7 +48,7 @@ def parse_finding(value: str) -> dict:
         value: Raw pipe-delimited string from a warning[] or suggestion[] entry.
 
     Returns:
-        dict with keys: test_id, description, details, severity.
+        dict with keys: test_id, description, details, solution.
 
     Raises:
         ValueError: If *value* is empty or not a string.
@@ -65,7 +69,7 @@ def parse_finding(value: str) -> dict:
         "test_id":     parts[0].strip(),
         "description": parts[1].strip(),
         "details":     parts[2].strip(),
-        "severity":    parts[3].strip(),
+        "solution":    parts[3].strip(),
     }
 
 
@@ -119,6 +123,11 @@ def parse_dat_file(dat_path: str) -> dict:
             key, _, value = line.partition("=")
             key   = key.strip().lower()
             value = value.strip()
+
+            # Lynis writes list-valued keys with a [] suffix (warning[]=...,
+            # suggestion[]=...) — normalize so the comparisons below match.
+            if key.endswith("[]"):
+                key = key[:-2]
 
             if key == _DAT_KEY_HARDENING_INDEX:
                 try:

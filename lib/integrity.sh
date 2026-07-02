@@ -40,9 +40,9 @@ integrity_audit() {
             log_debug "integrity_audit: aide command present (OK)"
         fi
 
-        # Check 4: AIDE database exists
-        if [[ ! -f "/var/lib/aide/aide.db" ]]; then
-            log_warn "FINDING: AIDE database not found at /var/lib/aide/aide.db"
+        # Check 4: AIDE database exists (gzip-configured systems produce .gz)
+        if [[ ! -f "/var/lib/aide/aide.db" && ! -f "/var/lib/aide/aide.db.gz" ]]; then
+            log_warn "FINDING: AIDE database not found at /var/lib/aide/aide.db(.gz)"
             (( AUDIT_FINDINGS++ )) || true
         else
             log_debug "integrity_audit: AIDE database exists (OK)"
@@ -251,6 +251,7 @@ _integrity_apply_aide() {
     fi
 
     # Configure AIDE to use SHA512 checksums (FINT-4402)
+    local checksums_changed=false
     if should_write; then
         local aide_conf_main
         if [[ -f "/etc/aide/aide.conf" ]]; then
@@ -271,6 +272,7 @@ _integrity_apply_aide() {
                 else
                     printf '\n# Hardener: use SHA512 for checksums (FINT-4402)\nChecksums = sha512\n' >> "${aide_conf_main}"
                 fi
+                checksums_changed=true
                 log_info "integrity_apply: AIDE checksums set to SHA512 in ${aide_conf_main}"
                 (( CHANGES_APPLIED++ )) || true
             else
@@ -279,9 +281,12 @@ _integrity_apply_aide() {
         fi
     fi
 
-    # Initialise the database if neither aide.db nor aide.db.gz exists
-    if [[ ! -f "/var/lib/aide/aide.db" && ! -f "/var/lib/aide/aide.db.gz" ]]; then
-        log_info "integrity_apply: AIDE database not found, initialising"
+    # Initialise the database if missing — or REinitialise after a checksum
+    # change: comparing against a database built with the old attribute set
+    # floods every daily check with spurious differences.
+    if [[ ! -f "/var/lib/aide/aide.db" && ! -f "/var/lib/aide/aide.db.gz" ]] \
+            || [[ "${checksums_changed}" == "true" ]]; then
+        log_info "integrity_apply: AIDE database missing or checksum set changed — initialising"
 
         if should_write; then
             # Locate aide config file
@@ -360,11 +365,14 @@ _integrity_apply_aide() {
         log_info "[DRY-RUN] Would ensure a cron daemon is installed, enabled, and started"
     fi
 
-    # Write daily cron job
+    # Write daily cron job. Resolve the binary path at write time — RHEL
+    # installs aide at /usr/sbin/aide, Debian at /usr/bin/aide.
+    local aide_bin
+    aide_bin="$(command -v aide 2>/dev/null || printf '/usr/bin/aide')"
     local cron_content
     cron_content="$(cat <<EOF
 #!/bin/bash
-/usr/bin/aide --check --config=${aide_conf_path} 2>&1 | /usr/bin/logger -t aide-check
+${aide_bin} --check --config=${aide_conf_path} 2>&1 | /usr/bin/logger -t aide-check
 EOF
 )"
 
