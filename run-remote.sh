@@ -18,6 +18,9 @@ RUN_VALIDATION="true"
 CONFIG_FILE="${SCRIPT_DIR}/config/hardener.conf"
 MODULE_FILTER=""
 PROVISION_USER=""
+ADMIN_USER=""
+AUTOMATION_USER=""
+LOCK_ROOT="auto"        # auto = disable root SSH when an admin user is provisioned
 
 # ─── Usage ───────────────────────────────────────────────────────────────────
 
@@ -41,9 +44,23 @@ OPTIONS:
   --mode <mode>          apply | audit | dry-run (default: apply)
   --config <path>        Config file (default: config/hardener.conf)
   --modules <list>       Comma-separated module filter (e.g., ssh,firewall)
-  --provision-user <name> Create a new user with SSH key and sudo, then run
-                         hardening as that user. Generates a keypair locally
-                         under artifacts/ and saves credentials there.
+  --provision-user <name> Create a new user with SSH key and passwordless sudo,
+                         then run hardening as that user (legacy single-account
+                         flow). Generates a keypair under artifacts/.
+
+ACCESS MODEL (recommended two-account posture):
+  --admin-user <name>    Create a human admin: SSH key login + PASSWORD-required
+                         sudo (added to sudo/wheel; a sudo password is generated
+                         and shown once). Key theft alone can't escalate.
+  --automation-user <name>
+                         Create an automation account for Ansible etc.: SSH key
+                         login + NOPASSWD sudo. Key + Ansible inventory snippet
+                         saved under artifacts/accounts/.
+  --lock-root            Disable root SSH login (PermitRootLogin no). Default
+                         when --admin-user is set; applied only after a non-root
+                         sudo account is verified reachable (no lockout).
+  --keep-root-ssh        Keep root SSH (prohibit-password) even with --admin-user.
+
   --no-lynis             Skip Lynis audits
   --no-validate          Skip post-hardening validation
   --no-artifacts         Don't collect artifacts back
@@ -53,7 +70,9 @@ EXAMPLES:
   ./run-remote.sh --host 192.168.1.100 --key ~/.ssh/id_ed25519
   ./run-remote.sh --host 10.0.0.5 --user admin --key ~/.ssh/mykey --mode audit
   ./run-remote.sh --host 10.0.0.5 --key ~/.ssh/mykey --modules ssh,firewall,sysctl
-  ./run-remote.sh --host 10.0.0.5 --key ~/.ssh/root_key --provision-user hardener
+  # Human admin (password sudo) + Ansible account, root SSH disabled:
+  ./run-remote.sh --host 10.0.0.5 --key ~/.ssh/root_key \
+      --admin-user liam --automation-user ansible
 EOF
     exit 0
 }
@@ -69,7 +88,11 @@ while [[ $# -gt 0 ]]; do
         --mode)         shift; MODE="$1" ;;
         --config)       shift; CONFIG_FILE="$1" ;;
         --modules)      shift; MODULE_FILTER="$1" ;;
-        --provision-user) shift; PROVISION_USER="$1" ;;
+        --provision-user)  shift; PROVISION_USER="$1" ;;
+        --admin-user)      shift; ADMIN_USER="$1" ;;
+        --automation-user) shift; AUTOMATION_USER="$1" ;;
+        --lock-root)       LOCK_ROOT="true" ;;
+        --keep-root-ssh)   LOCK_ROOT="false" ;;
         --no-lynis)     RUN_LYNIS="false" ;;
         --no-validate)  RUN_VALIDATION="false" ;;
         --no-artifacts) COLLECT_ARTIFACTS="false" ;;
@@ -154,6 +177,68 @@ remote_copy_from() {
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 -o BatchMode=yes \
         -r "${USER}@${HOST}:${src}" "${dest}"
+}
+
+# ─── Account provisioning helpers ────────────────────────────────────────────
+
+# _ssh_as <user> <key> [remote-cmd] — can we SSH in as <user> with <key>?
+_ssh_as() {
+    ssh -i "${2}" -p "${SSH_PORT}" \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 -o BatchMode=yes \
+        "${1}@${HOST}" "${3:-true}" &>/dev/null
+}
+
+# _provision_account <username> <admin|automation> <pubkey> <password-or-empty>
+# Runs over the current (root/sudo) connection: creates the user, installs the
+# SSH key, adds it to the distro sudo group, and sets sudo policy by type —
+#   admin      : password-required sudo (a password is set; NOPASSWD removed)
+#   automation : passwordless sudo (for Ansible), no interactive password
+_provision_account() {
+    local acct="$1" atype="$2" pubkey="$3" acct_pw="$4"
+    remote_exec_script <<ACCT_EOF
+set -euo pipefail
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:\${PATH}"
+NEW_USER='${acct}'
+ATYPE='${atype}'
+PUBKEY='${pubkey}'
+
+id "\${NEW_USER}" &>/dev/null || useradd -m -s /bin/bash "\${NEW_USER}"
+
+SSHDIR="/home/\${NEW_USER}/.ssh"
+mkdir -p "\${SSHDIR}"; chmod 700 "\${SSHDIR}"
+grep -qF "\${PUBKEY}" "\${SSHDIR}/authorized_keys" 2>/dev/null \
+    || printf '%s\n' "\${PUBKEY}" >> "\${SSHDIR}/authorized_keys"
+chmod 600 "\${SSHDIR}/authorized_keys"
+chown -R "\${NEW_USER}:\${NEW_USER}" "\${SSHDIR}"
+
+# Add to the distro's sudo group (Debian: sudo, RHEL: wheel)
+SUDO_GRP=""
+getent group sudo  >/dev/null 2>&1 && SUDO_GRP=sudo
+getent group wheel >/dev/null 2>&1 && SUDO_GRP=wheel
+[ -n "\${SUDO_GRP}" ] && usermod -aG "\${SUDO_GRP}" "\${NEW_USER}"
+
+if [ "\${ATYPE}" = admin ]; then
+    # Group membership already prompts for a password on sudo; set that
+    # password and drop any stale NOPASSWD grant for this user.
+    printf '%s:%s\n' "\${NEW_USER}" '${acct_pw}' | chpasswd
+    rm -f "/etc/sudoers.d/90-hardener-\${NEW_USER}" "/etc/sudoers.d/91-automation-\${NEW_USER}"
+    echo "  admin '\${NEW_USER}': key login + password-required sudo (group \${SUDO_GRP:-none})"
+else
+    # Automation (Ansible): passwordless sudo, account has no usable password.
+    SUDOFILE="/etc/sudoers.d/91-automation-\${NEW_USER}"
+    TMPSUDO="\$(mktemp)"
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "\${NEW_USER}" > "\${TMPSUDO}"
+    if visudo -cf "\${TMPSUDO}" >/dev/null 2>&1; then
+        install -m 440 "\${TMPSUDO}" "\${SUDOFILE}"
+        echo "  automation '\${NEW_USER}': key login + NOPASSWD sudo (group \${SUDO_GRP:-none})"
+    else
+        echo "  ERROR: generated sudoers for '\${NEW_USER}' failed visudo -c — not installed" >&2
+    fi
+    rm -f "\${TMPSUDO}"
+    passwd -l "\${NEW_USER}" >/dev/null 2>&1 || true
+fi
+ACCT_EOF
 }
 
 # ─── Setup ───────────────────────────────────────────────────────────────────
@@ -290,6 +375,78 @@ SSH command:
 CREDEOF
 
     printf '  Credentials saved to: %s/\n\n' "${PROVISION_KEY_DIR}"
+fi
+
+# ─── Step 1.6: Access accounts (admin / automation) ─────────────────────────
+
+if [[ -n "${ADMIN_USER}" || -n "${AUTOMATION_USER}" ]]; then
+    printf '[1.6/8] Provisioning access accounts...\n'
+    ACCOUNTS_DIR="${ARTIFACTS_DIR}/accounts"
+    mkdir -p "${ACCOUNTS_DIR}"; chmod 700 "${ACCOUNTS_DIR}"
+
+    if [[ -n "${ADMIN_USER}" ]]; then
+        ADMIN_KEY="${ACCOUNTS_DIR}/${ADMIN_USER}"
+        [[ -f "${ADMIN_KEY}" ]] || ssh-keygen -t ed25519 -f "${ADMIN_KEY}" -N "" \
+            -C "${ADMIN_USER}@${HOST}-admin" >/dev/null 2>&1
+        chmod 600 "${ADMIN_KEY}"; chmod 644 "${ADMIN_KEY}.pub"
+        # Bounded read + bash slice: `tr < /dev/urandom | head -c N` makes tr
+        # die by SIGPIPE (141) when head closes early, which aborts this
+        # top-level script under `set -o pipefail`.
+        ADMIN_PW="$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+        ADMIN_PW="${ADMIN_PW:0:24}"
+        _provision_account "${ADMIN_USER}" admin "$(cat "${ADMIN_KEY}.pub")" "${ADMIN_PW}"
+        if _ssh_as "${ADMIN_USER}" "${ADMIN_KEY}"; then
+            printf '  Verified SSH as admin "%s".\n' "${ADMIN_USER}"
+        else
+            printf 'ERROR: cannot SSH as admin "%s" — aborting before any root lockdown.\n' "${ADMIN_USER}" >&2
+            exit 1
+        fi
+        cat > "${ACCOUNTS_DIR}/${ADMIN_USER}.README.txt" <<EOF
+Admin account — SSH key login, password-required sudo
+Host        : ${HOST}:${SSH_PORT}
+Username    : ${ADMIN_USER}
+Private key : ${ADMIN_KEY}
+SSH         : ssh -i ${ADMIN_KEY} -p ${SSH_PORT} ${ADMIN_USER}@${HOST}
+Sudo        : requires the password below (member of sudo/wheel)
+Sudo pass   : ${ADMIN_PW}
+Created     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+        chmod 600 "${ACCOUNTS_DIR}/${ADMIN_USER}.README.txt"
+        printf '  Admin "%s" sudo password (SHOWN ONCE, saved to accounts/): %s\n' "${ADMIN_USER}" "${ADMIN_PW}"
+    fi
+
+    if [[ -n "${AUTOMATION_USER}" ]]; then
+        AUTO_KEY="${ACCOUNTS_DIR}/${AUTOMATION_USER}"
+        [[ -f "${AUTO_KEY}" ]] || ssh-keygen -t ed25519 -f "${AUTO_KEY}" -N "" \
+            -C "${AUTOMATION_USER}@${HOST}-automation" >/dev/null 2>&1
+        chmod 600 "${AUTO_KEY}"; chmod 644 "${AUTO_KEY}.pub"
+        _provision_account "${AUTOMATION_USER}" automation "$(cat "${AUTO_KEY}.pub")" ""
+        if _ssh_as "${AUTOMATION_USER}" "${AUTO_KEY}" 'sudo -n true'; then
+            printf '  Verified SSH + passwordless sudo as automation "%s".\n' "${AUTOMATION_USER}"
+        else
+            printf '  WARN: could not verify key+NOPASSWD-sudo as "%s" — check manually.\n' "${AUTOMATION_USER}"
+        fi
+        cat > "${ACCOUNTS_DIR}/${AUTOMATION_USER}.README.txt" <<EOF
+Automation account — SSH key login, passwordless sudo (for Ansible)
+Host        : ${HOST}:${SSH_PORT}
+Username    : ${AUTOMATION_USER}
+Private key : ${AUTO_KEY}
+SSH         : ssh -i ${AUTO_KEY} -p ${SSH_PORT} ${AUTOMATION_USER}@${HOST}
+Sudo        : NOPASSWD (all) via /etc/sudoers.d/91-automation-${AUTOMATION_USER}
+Created     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+Ansible inventory line:
+  ${HOST} ansible_user=${AUTOMATION_USER} ansible_ssh_private_key_file=${AUTO_KEY} ansible_become=true ansible_become_method=sudo
+EOF
+        chmod 600 "${ACCOUNTS_DIR}/${AUTOMATION_USER}.README.txt"
+        printf '  Automation key + Ansible inventory saved: %s\n' "${ACCOUNTS_DIR}/${AUTOMATION_USER}.README.txt"
+    fi
+    printf '\n'
+fi
+
+# Resolve the root-lock decision (auto = disable root SSH when an admin exists)
+if [[ "${LOCK_ROOT}" == "auto" ]]; then
+    if [[ -n "${ADMIN_USER}" ]]; then LOCK_ROOT="true"; else LOCK_ROOT="false"; fi
 fi
 
 # ─── Step 2: Bootstrap ───────────────────────────────────────────────────────
@@ -435,6 +592,45 @@ else
     printf '[7/8] Skipping artifact collection.\n\n'
 fi
 
+# ─── Step 7.5: Disable root SSH login (optional, done last) ─────────────────
+# Last so the earlier steps' root SSH connections keep working. Guarded: only
+# proceeds once a non-root sudo account is confirmed reachable.
+
+if [[ "${LOCK_ROOT}" == "true" && "${MODE}" == "apply" ]]; then
+    printf '[7.5/8] Disabling root SSH login...\n'
+
+    ROOT_LOCK_OK="false"
+    if [[ -n "${ADMIN_USER}" ]] && _ssh_as "${ADMIN_USER}" "${ACCOUNTS_DIR}/${ADMIN_USER}"; then
+        ROOT_LOCK_OK="true"
+    elif [[ -n "${AUTOMATION_USER}" ]] && _ssh_as "${AUTOMATION_USER}" "${ACCOUNTS_DIR}/${AUTOMATION_USER}" 'sudo -n true'; then
+        ROOT_LOCK_OK="true"
+    fi
+
+    if [[ "${ROOT_LOCK_OK}" != "true" ]]; then
+        printf '  WARN: no non-root sudo account verified reachable — leaving root SSH enabled to avoid lockout.\n\n'
+    else
+        # Early-sorting drop-in: sshd keeps the FIRST value per keyword, so
+        # 00- overrides the hardener's 99-hardening.conf PermitRootLogin.
+        remote_exec_script <<'ROOTOFF_EOF'
+set -euo pipefail
+mkdir -p /etc/ssh/sshd_config.d /run/sshd
+printf '# Managed by linux-hardener (run-remote --lock-root)\nPermitRootLogin no\n' \
+    > /etc/ssh/sshd_config.d/00-hardener-root-off.conf
+chmod 600 /etc/ssh/sshd_config.d/00-hardener-root-off.conf
+err="$(mktemp)"
+if sshd -t 2>"${err}"; then
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+    echo "  Root SSH login disabled (PermitRootLogin no)."
+else
+    rm -f /etc/ssh/sshd_config.d/00-hardener-root-off.conf
+    echo "  ERROR: sshd -t rejected the root-off drop-in; reverted:"; cat "${err}"
+fi
+rm -f "${err}"
+ROOTOFF_EOF
+        printf '\n'
+    fi
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 printf '════════════════════════════════════════════════════════════\n'
@@ -458,6 +654,27 @@ if [[ -n "${PROVISION_USER}" ]]; then
     printf ' SSH key  : %s\n' "${PROVISION_KEY_PATH}"
     printf ' Sudo     : passwordless\n'
     printf ' Connect  : ssh -i %s -p %s %s@%s\n' "${PROVISION_KEY_PATH}" "${SSH_PORT}" "${PROVISION_USER}" "${HOST}"
+fi
+
+if [[ -n "${ADMIN_USER}" ]]; then
+    printf '\n'
+    printf ' ── Admin account (key login + password sudo) ─────────────\n'
+    printf ' Username : %s\n' "${ADMIN_USER}"
+    printf ' SSH key  : %s\n' "${ADMIN_KEY}"
+    printf ' Sudo     : requires password (see accounts/%s.README.txt)\n' "${ADMIN_USER}"
+    printf ' Connect  : ssh -i %s -p %s %s@%s\n' "${ADMIN_KEY}" "${SSH_PORT}" "${ADMIN_USER}" "${HOST}"
+fi
+
+if [[ -n "${AUTOMATION_USER}" ]]; then
+    printf '\n'
+    printf ' ── Automation account (Ansible; key + NOPASSWD sudo) ─────\n'
+    printf ' Username : %s\n' "${AUTOMATION_USER}"
+    printf ' SSH key  : %s\n' "${AUTO_KEY}"
+    printf ' Ansible  : ansible_user=%s ansible_ssh_private_key_file=%s ansible_become=true\n' "${AUTOMATION_USER}" "${AUTO_KEY}"
+fi
+
+if [[ "${LOCK_ROOT}" == "true" ]]; then
+    printf '\n Root SSH : disabled (PermitRootLogin no)\n'
 fi
 
 printf '════════════════════════════════════════════════════════════\n'

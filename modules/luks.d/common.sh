@@ -153,8 +153,10 @@ _luks_gen_passphrase() {
     elif command -v openssl &>/dev/null; then
         openssl rand -base64 64 | tr -d '\n=+/' | cut -c1-64
     else
-        tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 64
-        printf '\n'
+        # Bounded read + slice — `tr < /dev/urandom | head -c N` SIGPIPEs tr.
+        local _rnd
+        _rnd="$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+        printf '%s\n' "${_rnd:0:64}"
     fi
 }
 
